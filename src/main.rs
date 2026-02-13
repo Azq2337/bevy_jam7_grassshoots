@@ -1,6 +1,7 @@
 use avian3d::prelude::*;
 use bevy::{
     input::mouse::MouseMotion,
+    light::NotShadowCaster,
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
@@ -11,24 +12,19 @@ fn main() {
             DefaultPlugins,
             PhysicsPlugins::default(),
         ))
+        .insert_resource(ClearColor(Color::srgb(0.35, 0.6, 0.9)))
         .init_state::<GameState>()
         .add_systems(Startup, setup)
-        
-        // 1. Notice player_look is now here! It runs ALL the time to drain mouse events.
         .add_systems(
             Update,
             (handle_pause_input, lock_cursor_on_click, player_look, update_rotation_ui),
         )
-        
-        // 2. Gameplay systems that ONLY run when playing
         .add_systems(
             Update,
             (player_move, update_fov).run_if(in_state(GameState::Playing)),
         )
-        
         .add_systems(OnEnter(GameState::Paused), (on_pause, spawn_pause_menu))
         .add_systems(OnExit(GameState::Paused), (on_resume, despawn_pause_menu))
-        
         .run();
 }
 
@@ -51,7 +47,7 @@ struct CameraPitch(f32);
 struct PauseMenu; 
 
 #[derive(Component)]
-struct RotationText; // NEW: Marker for our top-left UI text
+struct RotationText; 
 
 // --- SYSTEMS ---
 
@@ -75,7 +71,7 @@ fn setup(
         Collider::cuboid(50.0, 1.0, 50.0),
     ));
 
-    // Obstacle
+    // Target Obstacle
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(4.0, 2.0, 4.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.8, 0.3, 0.3))),
@@ -84,19 +80,88 @@ fn setup(
         Collider::cuboid(4.0, 2.0, 4.0),
     ));
 
-    // Lighting
+    // --- CELESTIAL BODIES ---
+    
+    let sun_direction = Vec3::new(1.0, 1.0, 1.0).normalize();
+    // FIXED: Positive Y ensures the moon is actually in the sky, not underground!
+    let moon_direction = Vec3::new(-1.0, 0.8, -1.0).normalize(); 
+    let sky_distance = 150.0; 
+
+    // 1. The Light Source
     commands.spawn((
-        PointLight {
+        DirectionalLight {
+            illuminance: 12_000.0,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(0.0, 8.0, 0.0),
+        Transform::from_translation(sun_direction * sky_distance)
+            .looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Player
+    // 2. The Visual Sun
+    commands.spawn((
+        Mesh3d(meshes.add(Sphere::new(8.0))), 
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.9, 0.2), // Yellow
+            unlit: true, // Retains exact color without HDR blowout
+            ..default()
+        })),
+        Transform::from_translation(sun_direction * sky_distance),
+        NotShadowCaster, // FIXED: Prevents the giant round shadow
+    ));
+
+    // 3. The Visual Moon
+    commands.spawn((
+        Mesh3d(meshes.add(Sphere::new(5.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.8, 0.8, 1.0), // Pale blue
+            unlit: true,
+            ..default()
+        })),
+        Transform::from_translation(moon_direction * sky_distance),
+        NotShadowCaster, 
+    ));
+
+    // --- TREES ---
+
+    let trunk_mat = materials.add(Color::srgb(0.4, 0.2, 0.0));
+    let trunk_mesh = meshes.add(Cylinder::new(0.5, 4.0));
+    let leaves_mat = materials.add(Color::srgb(0.1, 0.4, 0.1));
+    let leaves_mesh = meshes.add(Sphere::new(2.5));
+
+    // Random coordinates scattered around the map edges
+    let tree_positions = [
+        (15.0, -15.0), (-20.0, 10.0), (10.0, 20.0), (-15.0, -20.0),
+        (20.0, -5.0), (-10.0, -15.0), (0.0, 22.0), (22.0, 5.0),
+        (-22.0, -5.0), (-5.0, -22.0),
+    ];
+
+    for (x, z) in tree_positions {
+        // Spawn Trunk (Has physics collider so you can't walk through it)
+        commands.spawn((
+            Mesh3d(trunk_mesh.clone()),
+            MeshMaterial3d(trunk_mat.clone()),
+            Transform::from_xyz(x, 2.0, z),
+            RigidBody::Static,
+            Collider::cylinder(0.5, 4.0),
+        ));
+        // Spawn Leaves (Just visual)
+        commands.spawn((
+            Mesh3d(leaves_mesh.clone()),
+            MeshMaterial3d(leaves_mat.clone()),
+            Transform::from_xyz(x, 5.0, z),
+        ));
+    }
+
+    // --- PLAYER & UI SETUP ---
+
+    let initial_pitch = -0.22; // -12.6 degrees down
+
     commands.spawn((
         Player,
-        Transform::from_xyz(0.0, 2.0, 0.0),
+        // FIXED: Explicitly set Yaw to -45 degrees to perfectly face the red block
+        Transform::from_xyz(0.0, 2.0, 0.0)
+            .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4)), 
         RigidBody::Dynamic,
         Collider::capsule(0.4, 1.0),
         LockedAxes::ROTATION_LOCKED, 
@@ -104,8 +169,10 @@ fn setup(
     )).with_children(|parent| {
         parent.spawn((
             Camera3d::default(),
-            CameraPitch(0.0),
-            Transform::from_xyz(0.0, 0.6, 0.0), 
+            CameraPitch(initial_pitch),
+            // FIXED: Explicitly set Pitch to aim down at the block
+            Transform::from_xyz(0.0, 0.6, 0.0)
+                .with_rotation(Quat::from_rotation_x(initial_pitch)), 
         ));
     });
 
@@ -127,9 +194,9 @@ fn setup(
         ));
     });
 
-    // NEW: Top-Left Rotation UI
+    // Top-Left Rotation UI
     commands.spawn((
-        Text::new("Yaw: 0.0°\nPitch: 0.0°\nFOV: 0.0"),
+        Text::new("Yaw: 0.0 deg\nPitch: 0.0 deg\nFOV: 0.0"),
         TextFont {
             font_size: 24.0,
             ..default()
@@ -239,18 +306,15 @@ fn update_rotation_ui(
     let Ok((pitch, projection)) = camera_q.single() else { return };
     let Ok(mut text) = text_q.single_mut() else { return };
 
-    // Extract Yaw from the Player's body Quat rotation
     let (yaw, _, _) = player_transform.rotation.to_euler(EulerRot::YXZ);
     
-    // Extract current FOV
     let current_fov = match projection {
         Projection::Perspective(p) => p.fov.to_degrees(),
         _ => 0.0,
     };
 
-    // Update the UI text
     text.0 = format!(
-        "Yaw: {:.1}°\nPitch: {:.1}°\nFOV: {:.1}°", 
+        "Yaw: {:.1} deg\nPitch: {:.1} deg\nFOV: {:.1}", 
         yaw.to_degrees(), 
         pitch.0.to_degrees(),
         current_fov
@@ -291,7 +355,6 @@ fn player_move(
     }
 }
 
-// NEW: Dynamically adjust the FOV using PageUp and PageDown
 fn update_fov(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
@@ -299,17 +362,13 @@ fn update_fov(
 ) {
     let Ok(mut projection) = q_camera.single_mut() else { return };
     
-    // Check if we are using a Perspective camera (standard 3D)
     if let Projection::Perspective(ref mut persp) = *projection {
-        // time.delta_secs() ensures the zoom speed is consistent regardless of framerate
         let zoom_speed = 2.0 * time.delta_secs(); 
         
         if keyboard.pressed(KeyCode::PageUp) {
-            // Cap max FOV to avoid the screen flipping inside out
             persp.fov = (persp.fov + zoom_speed).min(2.5); 
         }
         if keyboard.pressed(KeyCode::PageDown) {
-            // Cap min FOV to avoid a black screen
             persp.fov = (persp.fov - zoom_speed).max(0.5); 
         }
     }
@@ -321,15 +380,11 @@ fn player_look(
     mut player_query: Query<&mut Transform, With<Player>>,
     mut camera_query: Query<(&mut Transform, &mut CameraPitch), (With<Camera3d>, Without<Player>)>,
 ) {
-    // FIX: We now read ALL mouse events FIRST, even if the game is paused. 
-    // This empties the queue so movements don't pile up.
     let mut delta = Vec2::ZERO;
     for event in mouse_motion.read() {
         delta += event.delta;
     }
 
-    // THEN we check if the cursor is grabbed. If it isn't (e.g. paused), we return early 
-    // and throw the queued movements away instead of applying them to the camera.
     let Ok(cursor) = primary_window.single() else { return };
     if cursor.grab_mode == CursorGrabMode::None { return; }
 
