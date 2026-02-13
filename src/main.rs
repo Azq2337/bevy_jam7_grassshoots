@@ -11,22 +11,21 @@ fn main() {
             DefaultPlugins,
             PhysicsPlugins::default(),
         ))
-        // 1. Initialize our Game State
         .init_state::<GameState>()
-        
-        // Setup runs once
         .add_systems(Startup, setup)
         
-        // 2. These systems run ALL THE TIME
-        .add_systems(Update, (handle_pause_input, lock_cursor_on_click))
-        
-        // 3. These systems ONLY run when Playing
+        // 1. Notice player_look is now here! It runs ALL the time to drain mouse events.
         .add_systems(
             Update,
-            (player_move, player_look).run_if(in_state(GameState::Playing)),
+            (handle_pause_input, lock_cursor_on_click, player_look, update_rotation_ui),
         )
         
-        // 4. State Transition Systems (Fired automatically when state changes)
+        // 2. Gameplay systems that ONLY run when playing
+        .add_systems(
+            Update,
+            (player_move, update_fov).run_if(in_state(GameState::Playing)),
+        )
+        
         .add_systems(OnEnter(GameState::Paused), (on_pause, spawn_pause_menu))
         .add_systems(OnExit(GameState::Paused), (on_resume, despawn_pause_menu))
         
@@ -49,7 +48,10 @@ struct Player;
 struct CameraPitch(f32);
 
 #[derive(Component)]
-struct PauseMenu; // Marker for our UI overlay
+struct PauseMenu; 
+
+#[derive(Component)]
+struct RotationText; // NEW: Marker for our top-left UI text
 
 // --- SYSTEMS ---
 
@@ -59,7 +61,6 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    // Lock cursor immediately on start
     if let Ok(mut cursor) = q_windows.single_mut() {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
@@ -125,6 +126,23 @@ fn setup(
             BackgroundColor(Color::WHITE),
         ));
     });
+
+    // NEW: Top-Left Rotation UI
+    commands.spawn((
+        Text::new("Yaw: 0.0°\nPitch: 0.0°\nFOV: 0.0"),
+        TextFont {
+            font_size: 24.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(10.0),
+            left: Val::Px(10.0),
+            ..default()
+        },
+        RotationText,
+    ));
 }
 
 // --- STATE MANAGEMENT ---
@@ -142,7 +160,6 @@ fn handle_pause_input(
     }
 }
 
-// If the player alt-tabs out and back in, left click re-locks the cursor
 fn lock_cursor_on_click(
     state: Res<State<GameState>>,
     mouse_btn: Res<ButtonInput<MouseButton>>,
@@ -160,12 +177,10 @@ fn on_pause(
     mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut time: ResMut<Time<Virtual>>,
 ) {
-    // 1. Free the mouse
     if let Ok(mut cursor) = q_windows.single_mut() {
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
     }
-    // 2. Pause Bevy's internal clock (which automatically pauses Avian3D physics!)
     time.pause();
 }
 
@@ -173,12 +188,10 @@ fn on_resume(
     mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut time: ResMut<Time<Virtual>>,
 ) {
-    // 1. Recapture the mouse
     if let Ok(mut cursor) = q_windows.single_mut() {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }
-    // 2. Resume physics and time
     time.unpause();
 }
 
@@ -186,16 +199,16 @@ fn on_resume(
 
 fn spawn_pause_menu(mut commands: Commands) {
     commands.spawn((
-        PauseMenu, // Tag it so we can easily despawn it later
+        PauseMenu, 
         Node {
             width: Val::Percent(100.0),
             height: Val::Percent(100.0),
-            position_type: PositionType::Absolute, // Overlay on top of everything
+            position_type: PositionType::Absolute, 
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             ..default()
         },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)), // Dark transparent background
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)), 
     )).with_children(|parent| {
         parent.spawn((
             Text::new("PAUSED\nPress ESC to Resume"),
@@ -213,12 +226,38 @@ fn despawn_pause_menu(
     query: Query<Entity, With<PauseMenu>>,
 ) {
     for entity in query.iter() {
-        // despawn_recursive destroys the entity and all its children (the text)
         commands.entity(entity).despawn();
     }
 }
 
-// --- GAMEPLAY SYSTEMS (Unchanged, just gated by State) ---
+fn update_rotation_ui(
+    player_q: Query<&Transform, With<Player>>,
+    camera_q: Query<(&CameraPitch, &Projection), With<Camera3d>>,
+    mut text_q: Query<&mut Text, With<RotationText>>,
+) {
+    let Ok(player_transform) = player_q.single() else { return };
+    let Ok((pitch, projection)) = camera_q.single() else { return };
+    let Ok(mut text) = text_q.single_mut() else { return };
+
+    // Extract Yaw from the Player's body Quat rotation
+    let (yaw, _, _) = player_transform.rotation.to_euler(EulerRot::YXZ);
+    
+    // Extract current FOV
+    let current_fov = match projection {
+        Projection::Perspective(p) => p.fov.to_degrees(),
+        _ => 0.0,
+    };
+
+    // Update the UI text
+    text.0 = format!(
+        "Yaw: {:.1}°\nPitch: {:.1}°\nFOV: {:.1}°", 
+        yaw.to_degrees(), 
+        pitch.0.to_degrees(),
+        current_fov
+    );
+}
+
+// --- GAMEPLAY SYSTEMS ---
 
 fn player_move(
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -252,19 +291,47 @@ fn player_move(
     }
 }
 
+// NEW: Dynamically adjust the FOV using PageUp and PageDown
+fn update_fov(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut q_camera: Query<&mut Projection, With<Camera3d>>,
+) {
+    let Ok(mut projection) = q_camera.single_mut() else { return };
+    
+    // Check if we are using a Perspective camera (standard 3D)
+    if let Projection::Perspective(ref mut persp) = *projection {
+        // time.delta_secs() ensures the zoom speed is consistent regardless of framerate
+        let zoom_speed = 2.0 * time.delta_secs(); 
+        
+        if keyboard.pressed(KeyCode::PageUp) {
+            // Cap max FOV to avoid the screen flipping inside out
+            persp.fov = (persp.fov + zoom_speed).min(2.5); 
+        }
+        if keyboard.pressed(KeyCode::PageDown) {
+            // Cap min FOV to avoid a black screen
+            persp.fov = (persp.fov - zoom_speed).max(0.5); 
+        }
+    }
+}
+
 fn player_look(
     mut mouse_motion: MessageReader<MouseMotion>, 
     primary_window: Query<&CursorOptions, With<PrimaryWindow>>,
     mut player_query: Query<&mut Transform, With<Player>>,
     mut camera_query: Query<(&mut Transform, &mut CameraPitch), (With<Camera3d>, Without<Player>)>,
 ) {
-    let Ok(cursor) = primary_window.single() else { return };
-    if cursor.grab_mode == CursorGrabMode::None { return; }
-
+    // FIX: We now read ALL mouse events FIRST, even if the game is paused. 
+    // This empties the queue so movements don't pile up.
     let mut delta = Vec2::ZERO;
     for event in mouse_motion.read() {
         delta += event.delta;
     }
+
+    // THEN we check if the cursor is grabbed. If it isn't (e.g. paused), we return early 
+    // and throw the queued movements away instead of applying them to the camera.
+    let Ok(cursor) = primary_window.single() else { return };
+    if cursor.grab_mode == CursorGrabMode::None { return; }
 
     if delta == Vec2::ZERO { return; }
 
