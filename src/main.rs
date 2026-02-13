@@ -5,6 +5,7 @@ use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
+use std::collections::HashMap;
 
 fn main() {
     App::new()
@@ -18,6 +19,7 @@ fn main() {
             Update,
             (
                 handle_pause_input,
+                handle_pause_buttons.run_if(in_state(GameState::Paused)),
                 lock_cursor_on_click,
                 player_look,
                 update_rotation_ui,
@@ -34,14 +36,22 @@ fn main() {
                 handle_respawns,
                 handle_grabbing,
                 update_grabbed_object,
+                handle_merging,
+                update_gun,
+                handle_oob,
+                check_win_condition,
             )
                 .run_if(in_state(GameState::Playing)),
         )
-        .add_systems(OnEnter(GameState::Loading), spawn_loading_screen)
+        .add_systems(Update, handle_win_input.run_if(in_state(GameState::Win)))
+        .add_systems(
+            OnEnter(GameState::Loading),
+            (spawn_loading_screen, cleanup_level),
+        )
         .add_systems(Update, tick_loading.run_if(in_state(GameState::Loading)))
         .add_systems(
             OnExit(GameState::Loading),
-            (despawn_loading_screen, capture_cursor),
+            (despawn_loading_screen, capture_cursor, spawn_level),
         )
         .add_systems(
             OnEnter(GameState::Paused),
@@ -51,6 +61,8 @@ fn main() {
             OnExit(GameState::Paused),
             (capture_cursor, unpause_time, despawn_pause_menu),
         )
+        .add_systems(OnEnter(GameState::Win), (release_cursor, spawn_win_screen))
+        .add_systems(OnExit(GameState::Win), (despawn_win_screen, capture_cursor))
         .run();
 }
 
@@ -62,6 +74,7 @@ enum GameState {
     Loading,
     Playing,
     Paused,
+    Win,
 }
 
 #[derive(Resource)]
@@ -74,9 +87,9 @@ struct GunTimer(Timer);
 struct GameAssets {
     bullet_mesh: Handle<Mesh>,
     bullet_mat: Handle<StandardMaterial>,
-    target_mesh: Handle<Mesh>,
-    target_mat: Handle<StandardMaterial>,
     target_transparent_mat: Handle<StandardMaterial>,
+    shape_meshes: HashMap<ShapeType, Handle<Mesh>>,
+    level_materials: Vec<Handle<StandardMaterial>>,
 }
 
 #[derive(Component)]
@@ -127,6 +140,33 @@ struct RespawnTimer {
 #[derive(Component)]
 struct Grabbed;
 
+#[derive(Component)]
+struct Gun;
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ShapeType {
+    Cube,
+    Sphere,
+    Cylinder,
+    Capsule,
+    Cone,
+}
+
+#[derive(Component)]
+struct Mergeable {
+    shape: ShapeType,
+    level: u32,
+}
+
+#[derive(Component)]
+struct WinScreen;
+
+#[derive(Component)]
+enum PauseButtonAction {
+    Continue,
+    Restart,
+}
+
 // --- SYSTEMS ---
 
 fn setup(
@@ -134,6 +174,34 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let mut shape_meshes = HashMap::new();
+    shape_meshes.insert(ShapeType::Cube, meshes.add(Cuboid::new(1.0, 1.0, 1.0)));
+    shape_meshes.insert(ShapeType::Sphere, meshes.add(Sphere::new(0.5)));
+    shape_meshes.insert(ShapeType::Cylinder, meshes.add(Cylinder::new(0.5, 1.0)));
+    shape_meshes.insert(ShapeType::Capsule, meshes.add(Capsule3d::new(0.5, 1.0)));
+    shape_meshes.insert(ShapeType::Cone, meshes.add(Cone::new(0.5, 1.0)));
+
+    let mut level_materials = Vec::new();
+    // Colors for levels 1-8 (Rainbow: Red -> Purple)
+    let colors = [
+        Color::srgb(1.0, 0.0, 0.0),   // 1 Red
+        Color::srgb(1.0, 0.5, 0.0),   // 2 Orange
+        Color::srgb(1.0, 1.0, 0.0),   // 3 Yellow
+        Color::srgb(0.0, 1.0, 0.0),   // 4 Green (Spawn)
+        Color::srgb(0.0, 0.0, 1.0),   // 5 Blue
+        Color::srgb(0.29, 0.0, 0.51), // 6 Indigo
+        Color::srgb(0.5, 0.0, 0.5),   // 7 Violet
+        Color::srgb(0.0, 0.0, 0.0),   // 8 Black/Purple (Win)
+    ];
+
+    for color in colors {
+        level_materials.push(materials.add(StandardMaterial {
+            base_color: color,
+            perceptual_roughness: 0.5,
+            ..default()
+        }));
+    }
+
     let game_assets = GameAssets {
         bullet_mesh: meshes.add(Sphere::new(0.08)),
         bullet_mat: materials.add(StandardMaterial {
@@ -141,45 +209,14 @@ fn setup(
             emissive: LinearRgba::rgb(2.0, 1.5, 0.0).into(),
             ..default()
         }),
-        target_mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        target_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.8, 0.4, 0.1),
-            perceptual_roughness: 0.5,
-            ..default()
-        }),
         target_transparent_mat: materials.add(StandardMaterial {
             base_color: Color::srgba(0.8, 0.4, 0.1, 0.5),
             alpha_mode: AlphaMode::Blend,
             ..default()
         }),
+        shape_meshes,
+        level_materials,
     };
-
-    let target_positions = [
-        Vec3::new(3.0, 1.0, -8.0),
-        Vec3::new(-4.0, 1.0, -7.0),
-        Vec3::new(8.0, 1.0, -3.0),
-        Vec3::new(-9.0, 1.0, -2.0),
-        Vec3::new(6.0, 1.0, 4.0),
-        Vec3::new(-7.0, 1.0, 5.0),
-        Vec3::new(2.0, 1.0, 9.0),
-        Vec3::new(-3.0, 1.0, 8.0),
-        Vec3::new(10.0, 1.0, -10.0),
-        Vec3::new(-10.0, 1.0, 10.0),
-    ];
-
-    for pos in target_positions {
-        commands.spawn((
-            Target {
-                health: 4,
-                original_pos: pos,
-            },
-            Mesh3d(game_assets.target_mesh.clone()),
-            MeshMaterial3d(game_assets.target_mat.clone()),
-            Transform::from_translation(pos),
-            RigidBody::Dynamic,
-            Collider::cuboid(1.0, 1.0, 1.0),
-        ));
-    }
 
     commands.insert_resource(game_assets);
 
@@ -277,50 +314,6 @@ fn setup(
         ));
     }
 
-    let initial_pitch = -0.22;
-
-    commands
-        .spawn((
-            Player {
-                velocity: Vec3::ZERO,
-                grounded: true,
-            },
-            DashCooldown(Timer::from_seconds(1.0, TimerMode::Once)),
-            JumpCount(0),
-            Transform::from_xyz(0.0, 2.0, 0.0)
-                .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4)),
-            RigidBody::Dynamic,
-            Collider::capsule(0.4, 1.0),
-            LockedAxes::ROTATION_LOCKED,
-            Friction::new(0.0),
-            // LinearDamping(10.0), // Removed global damping to fix gravity/jump
-        ))
-        .with_children(|parent| {
-            parent
-                .spawn((
-                    Camera3d::default(),
-                    Projection::Perspective(PerspectiveProjection {
-                        fov: 100.0_f32.to_radians(),
-                        ..default()
-                    }),
-                    CameraPitch(initial_pitch),
-                    Transform::from_xyz(0.0, 0.6, 0.0)
-                        .with_rotation(Quat::from_rotation_x(initial_pitch)),
-                ))
-                .with_children(|cam| {
-                    // SPWANS A SIMPLE GUN MODEL
-                    cam.spawn((
-                        Mesh3d(meshes.add(Cuboid::new(0.15, 0.15, 0.6))),
-                        MeshMaterial3d(materials.add(StandardMaterial {
-                            base_color: Color::srgb(0.2, 0.2, 0.2),
-                            perceptual_roughness: 0.1,
-                            ..default()
-                        })),
-                        Transform::from_xyz(0.35, -0.25, -0.45),
-                    ));
-                });
-        });
-
     commands
         .spawn(Node {
             width: Val::Percent(100.0),
@@ -378,7 +371,7 @@ fn handle_pause_input(
         match state.get() {
             GameState::Playing => next_state.set(GameState::Paused),
             GameState::Paused => next_state.set(GameState::Playing),
-            GameState::Loading => {}
+            GameState::Loading | GameState::Win => {}
         }
     }
 }
@@ -460,8 +453,10 @@ fn spawn_pause_menu(mut commands: Commands) {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
                 position_type: PositionType::Absolute,
+                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
+                row_gap: Val::Px(20.0),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
@@ -469,13 +464,47 @@ fn spawn_pause_menu(mut commands: Commands) {
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("PAUSED\nPress ESC to Resume"),
+                Text::new("PAUSED"),
                 TextFont {
                     font_size: 50.0,
                     ..default()
                 },
                 TextColor(Color::WHITE),
             ));
+
+            let button_node = Node {
+                width: Val::Px(200.0),
+                height: Val::Px(65.0),
+                border: UiRect::all(Val::Px(5.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            };
+            let button_bg = BackgroundColor(Color::linear_rgb(0.15, 0.15, 0.15));
+            let text_font = TextFont {
+                font_size: 33.0,
+                ..default()
+            };
+            let text_color = TextColor(Color::srgb(0.9, 0.9, 0.9));
+
+            // Continue Button
+            parent
+                .spawn((
+                    Button,
+                    button_node.clone(),
+                    button_bg,
+                    PauseButtonAction::Continue,
+                ))
+                .with_children(|parent| {
+                    parent.spawn((Text::new("Continue"), text_font.clone(), text_color));
+                });
+
+            // Restart Button
+            parent
+                .spawn((Button, button_node, button_bg, PauseButtonAction::Restart))
+                .with_children(|parent| {
+                    parent.spawn((Text::new("Restart"), text_font, text_color));
+                });
         });
 }
 
@@ -648,21 +677,32 @@ fn player_move(
 }
 
 fn update_fov(
-    keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    mut q_camera: Query<&mut Projection, With<Camera3d>>,
+    mut q_camera: Query<(&mut Projection, &GlobalTransform), With<Camera3d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    grabbed_q: Query<Entity, With<Grabbed>>,
 ) {
-    let Ok(mut projection) = q_camera.single_mut() else {
+    let Ok((mut projection, _)) = q_camera.single_mut() else {
         return;
     };
     if let Projection::Perspective(ref mut persp) = *projection {
-        let zoom_speed = 2.0 * time.delta_secs();
-        if keyboard.pressed(KeyCode::PageUp) {
-            persp.fov = (persp.fov + zoom_speed).min(120.0_f32.to_radians());
-        }
-        if keyboard.pressed(KeyCode::PageDown) {
-            persp.fov = (persp.fov - zoom_speed).max(30.0_f32.to_radians());
-        }
+        // Target FOV:
+        // If holding: Default (100 deg)
+        // If ADS (RMB held & not holding): Zoom (e.g. 50 deg)
+        // Default: 100 deg
+        let target_fov_deg = if !grabbed_q.is_empty() {
+            100.0
+        } else if mouse.pressed(MouseButton::Right) {
+            45.0 // ADS
+        } else {
+            100.0
+        };
+
+        // Lerp
+        let current_fov_deg = persp.fov.to_degrees();
+        let new_fov =
+            current_fov_deg + (target_fov_deg - current_fov_deg) * 15.0 * time.delta_secs();
+        persp.fov = new_fov.to_radians();
     }
 }
 
@@ -708,7 +748,13 @@ fn handle_shooting(
     mut gun_timer: ResMut<GunTimer>,
     camera_q: Query<&GlobalTransform, With<Camera3d>>,
     assets: Res<GameAssets>,
+    grabbed_q: Query<Entity, With<Grabbed>>,
 ) {
+    // Disable shooting if holding an object
+    if !grabbed_q.is_empty() {
+        return;
+    }
+
     let Ok(cam_transform) = camera_q.single() else {
         return;
     };
@@ -739,8 +785,9 @@ fn handle_shooting(
             ));
         }
     } else {
-        let duration = gun_timer.0.duration();
-        gun_timer.0.set_elapsed(duration);
+        // Cooldown or reset
+        // let duration = gun_timer.0.duration();
+        // gun_timer.0.set_elapsed(duration);
     }
 }
 
@@ -760,7 +807,14 @@ fn bullet_hit_target(
     mut commands: Commands,
     mut collision_events: MessageReader<CollisionStart>,
     bullet_q: Query<Entity, With<Bullet>>,
-    mut target_q: Query<(Entity, &mut Target, &mut Transform)>,
+    mut target_q: Query<(
+        Entity,
+        &mut Target,
+        &mut Transform,
+        &mut Mergeable,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+    assets: Res<GameAssets>,
 ) {
     for collision in collision_events.read() {
         let (bullet, target) = if bullet_q.contains(collision.collider1)
@@ -777,18 +831,27 @@ fn bullet_hit_target(
             cmds.despawn();
         }
 
-        if let Ok((target_ent, mut target_data, mut target_transform)) = target_q.get_mut(target) {
-            target_data.health -= 1;
-            if target_data.health <= 0 {
+        if let Ok((target_ent, mut target_data, mut target_transform, mut mergeable, mut mat)) =
+            target_q.get_mut(target)
+        {
+            // Decrement Level (Health)
+            if mergeable.level > 1 {
+                mergeable.level -= 1;
+                // Update scale and material
+                let scale = 0.7 + (mergeable.level as f32 - 1.0) * 0.1;
+                target_transform.scale = Vec3::splat(scale);
+                mat.0 = assets.level_materials
+                    [(mergeable.level as usize - 1).min(assets.level_materials.len() - 1)]
+                .clone();
+            } else {
+                // Destroy if Level 1
                 if let Ok(mut cmds) = commands.get_entity(target_ent) {
                     cmds.despawn();
                 }
                 commands.spawn(RespawnTimer {
                     timer: Timer::from_seconds(3.0, TimerMode::Once),
-                    pos: Vec3::ZERO, // Randomization handled in handle_respawns
+                    pos: Vec3::ZERO,
                 });
-            } else {
-                target_transform.scale *= 0.75;
             }
         }
     }
@@ -799,59 +862,186 @@ fn handle_respawns(
     time: Res<Time>,
     mut timers: Query<(Entity, &mut RespawnTimer)>,
     assets: Res<GameAssets>,
+    targets: Query<Entity, With<Target>>,
 ) {
+    // 1. Process timers
     for (ent, mut respawn) in timers.iter_mut() {
         if respawn.timer.tick(time.delta()).just_finished() {
             commands.entity(ent).despawn();
+            spawn_new_target(&mut commands, &assets, None);
+        }
+    }
 
-            // Random position logic
-            let x = rand::random::<f32>() * 40.0 - 20.0;
-            let z = rand::random::<f32>() * 40.0 - 20.0;
-            let random_pos = Vec3::new(x, 1.0, z);
+    // 2. Maintain population (max 100)
+    // Only spawn one per frame to avoid lag spikes if many missing
+    if targets.iter().len() < 100 {
+        spawn_new_target(&mut commands, &assets, None);
+    }
+}
 
-            commands.spawn((
-                Target {
-                    health: 4,
-                    original_pos: random_pos,
-                },
-                Mesh3d(assets.target_mesh.clone()),
-                MeshMaterial3d(assets.target_mat.clone()),
-                Transform::from_translation(random_pos),
-                RigidBody::Dynamic,
-                Collider::cuboid(1.0, 1.0, 1.0),
-                SweptCcd::default(),
-            ));
+fn spawn_new_target(
+    commands: &mut Commands,
+    assets: &Res<GameAssets>,
+    override_data: Option<(Vec3, ShapeType, u32, i32)>, // pos, shape, level, health
+) {
+    let (pos, shape, level, health) = if let Some((p, s, l, h)) = override_data {
+        (p, s, l, h)
+    } else {
+        let x = rand::random::<f32>() * 40.0 - 20.0;
+        let z = rand::random::<f32>() * 40.0 - 20.0;
+        let shape = match rand::random::<u8>() % 5 {
+            0 => ShapeType::Cube,
+            1 => ShapeType::Sphere,
+            2 => ShapeType::Cylinder,
+            3 => ShapeType::Capsule,
+            _ => ShapeType::Cone,
+        };
+        // Default spawn at Level 4 (Green)
+        (Vec3::new(x, 1.0, z), shape, 4, 4)
+    };
+
+    let mesh = assets.shape_meshes.get(&shape).unwrap().clone();
+    let material =
+        assets.level_materials[(level as usize - 1).min(assets.level_materials.len() - 1)].clone();
+
+    // Scale: Level 1=0.7, Level 4=1.0, Level 8=1.4
+    let scale = 0.7 + (level as f32 - 1.0) * 0.1;
+
+    let collider = match shape {
+        ShapeType::Cube => Collider::cuboid(1.0, 1.0, 1.0),
+        ShapeType::Sphere => Collider::sphere(0.5),
+        ShapeType::Cylinder => Collider::cylinder(0.5, 1.0),
+        ShapeType::Capsule => Collider::capsule(0.5, 1.0),
+        ShapeType::Cone => Collider::cone(0.5, 1.0),
+    };
+
+    commands.spawn((
+        Target {
+            health,
+            original_pos: pos,
+        },
+        Mergeable { shape, level },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
+        RigidBody::Dynamic,
+        collider,
+        SweptCcd::default(),
+        CollisionEventsEnabled,
+        Restitution::new(0.5),
+    ));
+}
+
+fn handle_merging(
+    mut commands: Commands,
+    mut collision_events: MessageReader<CollisionStart>,
+    target_q: Query<(&Transform, &Target, &Mergeable)>,
+    assets: Res<GameAssets>,
+) {
+    let mut processed = std::collections::HashSet::new();
+
+    for collision in collision_events.read() {
+        let e1 = collision.collider1;
+        let e2 = collision.collider2;
+
+        if processed.contains(&e1) || processed.contains(&e2) {
+            continue;
+        }
+
+        if let (Ok((tr1, t1, m1)), Ok((tr2, t2, m2))) = (target_q.get(e1), target_q.get(e2)) {
+            // Check if mergeable (same level, ignore shape)
+            if m1.level == m2.level {
+                let new_level = m1.level + 1;
+                // Merge health? Or reset? Let's sum for now or max.
+                let new_health = (t1.health + t2.health).min(10);
+                let new_pos = (tr1.translation + tr2.translation) * 0.5;
+                // Pick shape from one parent
+                let new_shape = m1.shape;
+
+                commands.entity(e1).despawn();
+                commands.entity(e2).despawn();
+
+                processed.insert(e1);
+                processed.insert(e2);
+
+                spawn_new_target(
+                    &mut commands,
+                    &assets,
+                    Some((new_pos, new_shape, new_level, new_health)),
+                );
+            }
         }
     }
 }
 
+fn update_gun(
+    time: Res<Time>,
+    mut gun_q: Query<&mut Transform, With<Gun>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    grabbed_q: Query<Entity, With<Grabbed>>,
+) {
+    let Ok(mut transform) = gun_q.single_mut() else {
+        return;
+    };
+
+    // Base positions (relative to camera)
+    let default_pos = Vec3::new(0.35, -0.25, -0.45);
+    let ads_pos = Vec3::new(0.0, -0.15, -0.3); // Centered
+    let lowered_pos = Vec3::new(0.35, -0.5, -0.2); // Lowered
+
+    // Rotation
+    let default_rot = Quat::IDENTITY;
+    let lowered_rot = Quat::from_rotation_x(-0.5); // Point down
+
+    let (target_pos, target_rot) = if !grabbed_q.is_empty() {
+        (lowered_pos, lowered_rot)
+    } else if mouse.pressed(MouseButton::Right) {
+        (ads_pos, default_rot)
+    } else {
+        (default_pos, default_rot)
+    };
+
+    transform.translation = transform
+        .translation
+        .lerp(target_pos, 15.0 * time.delta_secs());
+    transform.rotation = transform
+        .rotation
+        .slerp(target_rot, 15.0 * time.delta_secs());
+}
+
 fn handle_grabbing(
     mut commands: Commands,
-    keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     camera_q: Query<&GlobalTransform, With<Camera3d>>,
-    grabbed_q: Query<Entity, With<Grabbed>>,
+    grabbed_q: Query<(Entity, &Mergeable), With<Grabbed>>,
     target_q: Query<Entity, With<Target>>,
-    spatial_query: SpatialQuery, // Make mutable to use filters if needed, though CastRay might not need it mut unless we change pipeline. Actually SpatialQuery is a SystemParam.
+    spatial_query: SpatialQuery,
     assets: Res<GameAssets>,
-    player_q: Query<Entity, With<Player>>, // Needed to filter player
+    player_q: Query<Entity, With<Player>>,
+    mut gun_timer: ResMut<GunTimer>,
 ) {
     let Ok(cam_transform) = camera_q.single() else {
         return;
     };
     let player_ent = player_q.iter().next();
 
-    if keyboard.just_pressed(KeyCode::KeyE) {
-        if let Ok(grabbed_ent) = grabbed_q.single() {
+    // Grab or Drop with RMB
+    if mouse.just_pressed(MouseButton::Right) {
+        if let Some((grabbed_ent, mergeable)) = grabbed_q.iter().next() {
+            // Drop
+            let material = assets.level_materials
+                [(mergeable.level as usize - 1).min(assets.level_materials.len() - 1)]
+            .clone();
             commands
                 .entity(grabbed_ent)
                 .remove::<Grabbed>()
-                .remove::<Sensor>() // Remove Sensor so it collides again
+                .remove::<Sensor>()
                 .insert(RigidBody::Dynamic)
-                .insert(MeshMaterial3d(assets.target_mat.clone()));
+                .insert(MeshMaterial3d(material));
         } else {
+            // Try Grab
             let ray_origin = cam_transform.translation();
             let ray_dir = cam_transform.forward();
-
             let mut filter = SpatialQueryFilter::default();
             if let Some(p) = player_ent {
                 filter = filter.with_excluded_entities([p]);
@@ -863,7 +1053,7 @@ fn handle_grabbing(
                         .entity(hit.entity)
                         .insert(Grabbed)
                         .insert(RigidBody::Kinematic)
-                        .insert(Sensor) // Make it a Sensor so it doesn't push the player
+                        .insert(Sensor)
                         .insert(LinearVelocity::ZERO)
                         .insert(AngularVelocity::ZERO)
                         .insert(MeshMaterial3d(assets.target_transparent_mat.clone()));
@@ -872,15 +1062,19 @@ fn handle_grabbing(
         }
     }
 
-    if keyboard.just_pressed(KeyCode::KeyQ) {
-        if let Ok(grabbed_ent) = grabbed_q.single() {
+    // Throw with LMB
+    if mouse.just_pressed(MouseButton::Left) {
+        if let Some((grabbed_ent, mergeable)) = grabbed_q.iter().next() {
+            let material = assets.level_materials
+                [(mergeable.level as usize - 1).min(assets.level_materials.len() - 1)]
+            .clone();
             commands
                 .entity(grabbed_ent)
                 .remove::<Grabbed>()
-                .remove::<Sensor>() // Remove Sensor
+                .remove::<Sensor>()
                 .insert(RigidBody::Dynamic)
                 .insert(LinearVelocity(cam_transform.forward() * 20.0))
-                .insert(MeshMaterial3d(assets.target_mat.clone()));
+                .insert(MeshMaterial3d(material));
         }
     }
 }
@@ -899,5 +1093,251 @@ fn update_grabbed_object(
         transform.translation = transform
             .translation
             .lerp(hold_pos, 20.0 * time.delta_secs());
+    }
+}
+
+fn handle_pause_buttons(
+    mut interaction_query: Query<
+        (&Interaction, &mut BackgroundColor, &PauseButtonAction),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut next_state: ResMut<NextState<GameState>>,
+    mut load_timer: ResMut<AssetLoadTimer>,
+) {
+    for (interaction, mut color, action) in &mut interaction_query {
+        match *interaction {
+            Interaction::Pressed => match action {
+                PauseButtonAction::Continue => {
+                    next_state.set(GameState::Playing);
+                }
+                PauseButtonAction::Restart => {
+                    load_timer.0.reset();
+                    next_state.set(GameState::Loading);
+                }
+            },
+            Interaction::Hovered => {
+                *color = BackgroundColor(Color::linear_rgb(0.25, 0.25, 0.25));
+            }
+            Interaction::None => {
+                *color = BackgroundColor(Color::linear_rgb(0.15, 0.15, 0.15));
+            }
+        }
+    }
+}
+
+fn cleanup_level(
+    mut commands: Commands,
+    q_targets: Query<Entity, With<Target>>,
+    q_player: Query<Entity, With<Player>>,
+    q_bullets: Query<Entity, With<Bullet>>,
+    q_respawns: Query<Entity, With<RespawnTimer>>,
+    q_grabbed: Query<Entity, With<Grabbed>>,
+) {
+    for e in q_targets.iter() {
+        commands.entity(e).despawn();
+    }
+    for e in q_player.iter() {
+        commands.entity(e).despawn();
+    }
+    for e in q_bullets.iter() {
+        commands.entity(e).despawn();
+    }
+    for e in q_respawns.iter() {
+        commands.entity(e).despawn();
+    }
+    for e in q_grabbed.iter() {
+        commands.entity(e).despawn();
+    }
+}
+
+fn spawn_level(
+    mut commands: Commands,
+    assets: Res<GameAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let target_positions = [
+        Vec3::new(3.0, 1.0, -8.0),
+        Vec3::new(-4.0, 1.0, -7.0),
+        Vec3::new(8.0, 1.0, -3.0),
+        Vec3::new(-9.0, 1.0, -2.0),
+        Vec3::new(6.0, 1.0, 4.0),
+        Vec3::new(-7.0, 1.0, 5.0),
+        Vec3::new(2.0, 1.0, 9.0),
+        Vec3::new(-3.0, 1.0, 8.0),
+        Vec3::new(10.0, 1.0, -10.0),
+        Vec3::new(-10.0, 1.0, 10.0),
+    ];
+
+    for pos in target_positions {
+        let shape = match rand::random::<u8>() % 5 {
+            0 => ShapeType::Cube,
+            1 => ShapeType::Sphere,
+            2 => ShapeType::Cylinder,
+            3 => ShapeType::Capsule,
+            _ => ShapeType::Cone,
+        };
+        spawn_new_target(&mut commands, &assets, Some((pos, shape, 4, 4)));
+    }
+
+    let initial_pitch = -0.22;
+
+    commands
+        .spawn((
+            Player {
+                velocity: Vec3::ZERO,
+                grounded: true,
+            },
+            DashCooldown(Timer::from_seconds(1.0, TimerMode::Once)),
+            JumpCount(0),
+            Transform::from_xyz(0.0, 2.0, 0.0)
+                .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4)),
+            RigidBody::Dynamic,
+            Collider::capsule(0.4, 1.0),
+            LockedAxes::ROTATION_LOCKED,
+            Friction::new(0.0),
+        ))
+        .with_children(|parent| {
+            parent
+                .spawn((
+                    Camera3d::default(),
+                    Projection::Perspective(PerspectiveProjection {
+                        fov: 100.0_f32.to_radians(),
+                        ..default()
+                    }),
+                    CameraPitch(initial_pitch),
+                    Transform::from_xyz(0.0, 0.6, 0.0)
+                        .with_rotation(Quat::from_rotation_x(initial_pitch)),
+                ))
+                .with_children(|cam| {
+                    cam.spawn((
+                        Mesh3d(meshes.add(Cuboid::new(0.15, 0.15, 0.6))),
+                        MeshMaterial3d(materials.add(StandardMaterial {
+                            base_color: Color::srgb(0.2, 0.2, 0.2),
+                            perceptual_roughness: 0.1,
+                            ..default()
+                        })),
+                        Transform::from_xyz(0.35, -0.25, -0.45),
+                        Gun,
+                    ));
+                });
+        });
+}
+
+fn handle_oob(
+    mut commands: Commands,
+    mut player_q: Query<(Entity, &mut Transform, &mut LinearVelocity), With<Player>>,
+    mut target_q: Query<(Entity, &mut Transform), (With<Target>, Without<Player>)>,
+) {
+    // Player OOB
+    if let Some((_, mut transform, mut velocity)) = player_q.iter_mut().next() {
+        if transform.translation.y < -10.0 {
+            transform.translation = Vec3::new(0.0, 2.0, 0.0);
+            *velocity = LinearVelocity::ZERO;
+        }
+    }
+
+    // Target OOB
+    for (entity, transform) in target_q.iter_mut() {
+        if transform.translation.y < -10.0 {
+            commands.entity(entity).despawn();
+            commands.spawn(RespawnTimer {
+                timer: Timer::from_seconds(3.0, TimerMode::Once),
+                pos: Vec3::ZERO,
+            });
+        }
+    }
+}
+
+fn check_win_condition(mut next_state: ResMut<NextState<GameState>>, target_q: Query<&Mergeable>) {
+    // Level 8 is the win condition
+    for mergeable in target_q.iter() {
+        if mergeable.level >= 8 {
+            next_state.set(GameState::Win);
+        }
+    }
+}
+
+fn spawn_win_screen(mut commands: Commands) {
+    commands
+        .spawn((
+            WinScreen,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                row_gap: Val::Px(20.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
+            ZIndex(50),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("YOU WIN!"),
+                TextFont {
+                    font_size: 60.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.84, 0.0)), // Gold
+            ));
+
+            let button_node = Node {
+                width: Val::Px(200.0),
+                height: Val::Px(65.0),
+                border: UiRect::all(Val::Px(5.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            };
+            let button_bg = BackgroundColor(Color::linear_rgb(0.15, 0.15, 0.15));
+            let text_font = TextFont {
+                font_size: 33.0,
+                ..default()
+            };
+            let text_color = TextColor(Color::srgb(0.9, 0.9, 0.9));
+
+            // Restart Button
+            parent
+                .spawn((Button, button_node, button_bg, PauseButtonAction::Restart))
+                .with_children(|parent| {
+                    parent.spawn((Text::new("Restart"), text_font, text_color));
+                });
+        });
+}
+
+fn despawn_win_screen(mut commands: Commands, query: Query<Entity, With<WinScreen>>) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn handle_win_input(
+    mut interaction_query: Query<
+        (&Interaction, &mut BackgroundColor, &PauseButtonAction),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut next_state: ResMut<NextState<GameState>>,
+    mut load_timer: ResMut<AssetLoadTimer>,
+) {
+    for (interaction, mut color, action) in &mut interaction_query {
+        match *interaction {
+            Interaction::Pressed => match action {
+                PauseButtonAction::Restart => {
+                    load_timer.0.reset();
+                    next_state.set(GameState::Loading);
+                }
+                _ => {}
+            },
+            Interaction::Hovered => {
+                *color = BackgroundColor(Color::linear_rgb(0.25, 0.25, 0.25));
+            }
+            Interaction::None => {
+                *color = BackgroundColor(Color::linear_rgb(0.15, 0.15, 0.15));
+            }
+        }
     }
 }
