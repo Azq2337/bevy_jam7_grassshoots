@@ -14,6 +14,11 @@ fn main() {
         .insert_resource(AssetLoadTimer(Timer::from_seconds(1.5, TimerMode::Once)))
         .insert_resource(GunTimer(Timer::from_seconds(0.15, TimerMode::Repeating)))
         .insert_resource(ShotBlocker(Timer::from_seconds(0.0, TimerMode::Once)))
+        .insert_resource(GameStats {
+            start_time: 0.0,
+            max_population: 100.0,
+        })
+        .insert_resource(HighScore::default())
         .init_state::<GameState>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -40,7 +45,8 @@ fn main() {
                 handle_merging,
                 update_gun,
                 handle_oob,
-                check_win_condition,
+                check_game_over,
+                update_game_stats,
                 tick_shot_blocker,
             )
                 .run_if(in_state(GameState::Playing)),
@@ -95,10 +101,7 @@ struct GameAssets {
 }
 
 #[derive(Component)]
-struct Player {
-    velocity: Vec3,
-    grounded: bool,
-}
+struct Player;
 
 #[derive(Component)]
 struct DashCooldown(Timer);
@@ -130,7 +133,6 @@ struct Lifetime(Timer);
 #[derive(Component)]
 struct Target {
     health: i32,
-    original_pos: Vec3,
 }
 
 #[derive(Component)]
@@ -158,6 +160,15 @@ enum ShapeType {
 
 #[derive(Resource)]
 struct ShotBlocker(Timer);
+
+#[derive(Resource)]
+struct GameStats {
+    start_time: f32,
+    max_population: f32,
+}
+
+#[derive(Resource, Default)]
+struct HighScore(f32);
 
 #[derive(Component)]
 struct Mergeable {
@@ -842,7 +853,7 @@ fn bullet_hit_target(
             cmds.despawn();
         }
 
-        if let Ok((target_ent, mut target_data, mut target_transform, mut mergeable, mut mat)) =
+        if let Ok((target_ent, _target_data, mut target_transform, mut mergeable, mut mat)) =
             target_q.get_mut(target)
         {
             // Decrement Level (Health)
@@ -915,10 +926,10 @@ fn spawn_new_target(
     let material =
         assets.level_materials[(level as usize - 1).min(assets.level_materials.len() - 1)].clone();
 
-    // Scale: Level 1=0.15, Levels double each time.
-    // Lvl 1=0.15, Lvl 4=1.2, Lvl 8=19.2
-    let base_scale = 0.15;
-    let scale = base_scale * 2.0_f32.powf(level as f32 - 1.0);
+    // Scale: Level 1=0.25, Volume doubles each level
+    // Scale factor = cuberoot(2) ~= 1.2599
+    let base_scale = 0.25;
+    let scale = base_scale * 1.2599_f32.powf(level as f32 - 1.0);
 
     let collider = match shape {
         ShapeType::Cube => Collider::cuboid(1.0, 1.0, 1.0),
@@ -930,10 +941,7 @@ fn spawn_new_target(
     };
 
     commands.spawn((
-        Target {
-            health,
-            original_pos: pos,
-        },
+        Target { health },
         Mergeable { shape, level },
         Mesh3d(mesh),
         MeshMaterial3d(material),
@@ -1032,7 +1040,6 @@ fn handle_grabbing(
     spatial_query: SpatialQuery,
     assets: Res<GameAssets>,
     player_q: Query<Entity, With<Player>>,
-    mut shot_blocker: ResMut<ShotBlocker>,
 ) {
     let Ok(cam_transform) = camera_q.single() else {
         return;
@@ -1121,6 +1128,8 @@ fn handle_pause_buttons(
     >,
     mut next_state: ResMut<NextState<GameState>>,
     mut load_timer: ResMut<AssetLoadTimer>,
+    mut stats: ResMut<GameStats>,
+    time: Res<Time>,
 ) {
     for (interaction, mut color, action) in &mut interaction_query {
         match *interaction {
@@ -1130,6 +1139,9 @@ fn handle_pause_buttons(
                 }
                 PauseButtonAction::Restart => {
                     load_timer.0.reset();
+                    // Reset stats
+                    stats.max_population = 100.0;
+                    stats.start_time = time.elapsed_secs();
                     next_state.set(GameState::Loading);
                 }
             },
@@ -1202,10 +1214,7 @@ fn spawn_level(
 
     commands
         .spawn((
-            Player {
-                velocity: Vec3::ZERO,
-                grounded: true,
-            },
+            Player,
             DashCooldown(Timer::from_seconds(1.0, TimerMode::Once)),
             JumpCount(0),
             Transform::from_xyz(0.0, 2.0, 0.0)
@@ -1267,27 +1276,40 @@ fn handle_oob(
     }
 }
 
-fn check_win_condition(mut next_state: ResMut<NextState<GameState>>, target_q: Query<&Mergeable>) {
-    // Level 8 is the win condition
+fn check_game_over(mut next_state: ResMut<NextState<GameState>>, target_q: Query<&Mergeable>) {
+    // Level 16 is Game Over (Loss)
     for mergeable in target_q.iter() {
-        if mergeable.level >= 8 {
-            next_state.set(GameState::Win);
+        if mergeable.level >= 16 {
+            next_state.set(GameState::Win); // Using Win state as Game Over
         }
     }
 }
 
-fn spawn_win_screen(mut commands: Commands) {
+fn update_game_stats(mut stats: ResMut<GameStats>, time: Res<Time>) {
+    stats.max_population += 50.0 * time.delta_secs();
+}
+
+fn spawn_win_screen(
+    mut commands: Commands,
+    time: Res<Time>,
+    stats: Res<GameStats>,
+    mut high_score: ResMut<HighScore>,
+) {
+    // Game Over Screen
+    let elapsed = time.elapsed_secs() - stats.start_time;
+    if elapsed > high_score.0 {
+        high_score.0 = elapsed;
+    }
+
     commands
         .spawn((
             WinScreen,
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                position_type: PositionType::Absolute,
-                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
-                row_gap: Val::Px(20.0),
+                flex_direction: FlexDirection::Column,
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
@@ -1295,9 +1317,25 @@ fn spawn_win_screen(mut commands: Commands) {
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("YOU WIN!"),
+                Text::new("GAME OVER"),
                 TextFont {
-                    font_size: 60.0,
+                    font_size: 80.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.0, 0.0)), // Red for loss
+            ));
+            parent.spawn((
+                Text::new(format!("Survival Time: {:.2}s", elapsed)),
+                TextFont {
+                    font_size: 40.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+            parent.spawn((
+                Text::new(format!("Personal Record: {:.2}s", high_score.0)),
+                TextFont {
+                    font_size: 30.0,
                     ..default()
                 },
                 TextColor(Color::srgb(1.0, 0.84, 0.0)), // Gold
@@ -1306,7 +1344,7 @@ fn spawn_win_screen(mut commands: Commands) {
             let button_node = Node {
                 width: Val::Px(200.0),
                 height: Val::Px(65.0),
-                border: UiRect::all(Val::Px(5.0)),
+                margin: UiRect::all(Val::Px(20.0)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
@@ -1340,12 +1378,18 @@ fn handle_win_input(
     >,
     mut next_state: ResMut<NextState<GameState>>,
     mut load_timer: ResMut<AssetLoadTimer>,
+    mut stats: ResMut<GameStats>,
+    time: Res<Time>,
 ) {
     for (interaction, mut color, action) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => match action {
                 PauseButtonAction::Restart => {
                     load_timer.0.reset();
+                    // Reset stats
+                    stats.max_population = 100.0;
+                    stats.start_time = time.elapsed_secs();
+
                     next_state.set(GameState::Loading);
                 }
                 _ => {}
