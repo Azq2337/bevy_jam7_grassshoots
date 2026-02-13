@@ -21,22 +21,17 @@ fn main() {
             Update,
             (handle_pause_input, lock_cursor_on_click, player_look, update_rotation_ui),
         )
-        // FIXED: Nested the tuples so Bevy's macros don't hit the size limit
         .add_systems(
             Update,
             (
-                (
-                    player_move, 
-                    update_fov,
-                    handle_shooting,        
-                    despawn_bullets,        
-                ),
-                (
-                    bullet_hit_target,      
-                    handle_respawns,        
-                    handle_grabbing,        
-                    update_grabbed_object,  
-                )
+                player_move, 
+                update_fov,
+                handle_shooting,        
+                despawn_bullets,        
+                bullet_hit_target,      
+                handle_respawns,        
+                handle_grabbing,        
+                update_grabbed_object,  
             ).run_if(in_state(GameState::Playing)),
         )
         .add_systems(OnEnter(GameState::Loading), spawn_loading_screen)
@@ -145,7 +140,7 @@ fn setup(
 
     for pos in target_positions {
         commands.spawn((
-            Target { health: 3, original_pos: pos },
+            Target { health: 4, original_pos: pos },
             Mesh3d(game_assets.target_mesh.clone()),
             MeshMaterial3d(game_assets.target_mat.clone()),
             Transform::from_translation(pos),
@@ -264,7 +259,18 @@ fn setup(
             CameraPitch(initial_pitch),
             Transform::from_xyz(0.0, 0.6, 0.0)
                 .with_rotation(Quat::from_rotation_x(initial_pitch)), 
-        ));
+        )).with_children(|cam| {
+            // SPWANS A SIMPLE GUN MODEL
+            cam.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.15, 0.15, 0.6))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.2, 0.2, 0.2),
+                    perceptual_roughness: 0.1,
+                    ..default()
+                })),
+                Transform::from_xyz(0.35, -0.25, -0.45),
+            ));
+        });
     });
 
     commands.spawn(Node {
@@ -553,6 +559,8 @@ fn handle_shooting(
                 LinearVelocity(forward * 50.0),
                 Bullet,
                 Lifetime(Timer::from_seconds(2.0, TimerMode::Once)),
+                // Use CCD to prevent tunneling at high speeds
+                SweptCcd::default(),
             ));
         }
     } else {
@@ -588,7 +596,6 @@ fn bullet_hit_target(
             continue;
         };
 
-        // FIXED: Now expecting Ok() instead of Some()
         if let Ok(mut cmds) = commands.get_entity(bullet) {
             cmds.despawn();
         }
@@ -597,7 +604,6 @@ fn bullet_hit_target(
             target_data.health -= 1;
             if target_data.health <= 0 {
                 let original_pos = target_data.original_pos;
-                // FIXED: Now expecting Ok() instead of Some()
                 if let Ok(mut cmds) = commands.get_entity(target_ent) {
                     cmds.despawn();
                 }
@@ -606,7 +612,8 @@ fn bullet_hit_target(
                     pos: original_pos,
                 });
             } else {
-                target_transform.scale *= 0.69; 
+                // Shrinking logic: roughly 3 steps of shrinking before death at health 0
+                target_transform.scale *= 0.75; 
             }
         }
     }
@@ -622,7 +629,7 @@ fn handle_respawns(
         if respawn.timer.tick(time.delta()).just_finished() {
             commands.entity(ent).despawn();
             commands.spawn((
-                Target { health: 3, original_pos: respawn.pos },
+                Target { health: 4, original_pos: respawn.pos },
                 Mesh3d(assets.target_mesh.clone()),
                 MeshMaterial3d(assets.target_mat.clone()),
                 Transform::from_translation(respawn.pos),
@@ -639,32 +646,41 @@ fn handle_grabbing(
     camera_q: Query<&GlobalTransform, With<Camera3d>>,
     grabbed_q: Query<Entity, With<Grabbed>>,
     target_q: Query<Entity, With<Target>>,
-    spatial_query: SpatialQuery,
+    mut spatial_query: SpatialQuery, // Make mutable to use filters if needed, though CastRay might not need it mut unless we change pipeline. Actually SpatialQuery is a SystemParam.
     assets: Res<GameAssets>,
+    player_q: Query<Entity, With<Player>>, // Needed to filter player
 ) {
     let Ok(cam_transform) = camera_q.single() else { return };
+    let player_ent = player_q.iter().next();
 
     if keyboard.just_pressed(KeyCode::KeyE) {
         if let Ok(grabbed_ent) = grabbed_q.single() {
             commands.entity(grabbed_ent)
                 .remove::<Grabbed>()
+                .remove::<Sensor>() // Remove Sensor so it collides again
                 .insert(RigidBody::Dynamic) 
                 .insert(MeshMaterial3d(assets.target_mat.clone())); 
         } else {
             let ray_origin = cam_transform.translation();
             let ray_dir = cam_transform.forward();
             
+            let mut filter = SpatialQueryFilter::default();
+            if let Some(p) = player_ent {
+                filter = filter.with_excluded_entities([p]);
+            }
+
             if let Some(hit) = spatial_query.cast_ray(
                 ray_origin,
                 ray_dir,
-                1000.0, 
+                4.0, 
                 true,
-                &SpatialQueryFilter::default(),
+                &filter,
             ) {
                 if target_q.contains(hit.entity) {
                     commands.entity(hit.entity)
                         .insert(Grabbed)
                         .insert(RigidBody::Kinematic) 
+                        .insert(Sensor) // Make it a Sensor so it doesn't push the player
                         .insert(LinearVelocity::ZERO) 
                         .insert(AngularVelocity::ZERO)
                         .insert(MeshMaterial3d(assets.target_transparent_mat.clone())); 
@@ -677,6 +693,7 @@ fn handle_grabbing(
         if let Ok(grabbed_ent) = grabbed_q.single() {
             commands.entity(grabbed_ent)
                 .remove::<Grabbed>()
+                .remove::<Sensor>() // Remove Sensor
                 .insert(RigidBody::Dynamic)
                 .insert(LinearVelocity(cam_transform.forward() * 30.0)) 
                 .insert(MeshMaterial3d(assets.target_mat.clone()));
@@ -691,7 +708,8 @@ fn update_grabbed_object(
 ) {
     let Ok(cam_transform) = camera_q.single() else { return };
     if let Ok(mut transform) = grabbed_q.single_mut() {
-        let hold_pos = cam_transform.translation() + cam_transform.forward() * 2.5;
+        // Positioned slightly closer for a better FPS feel
+        let hold_pos = cam_transform.translation() + cam_transform.forward() * 2.2;
         transform.translation = transform.translation.lerp(hold_pos, 20.0 * time.delta_secs());
     }
 }
