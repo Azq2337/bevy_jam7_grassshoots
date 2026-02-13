@@ -1,10 +1,10 @@
-use avian3d::prelude::*;
 use bevy::{
-    input::mouse::MouseMotion,
-    light::NotShadowCaster,
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
+    input::mouse::MouseMotion,
+    light::NotShadowCaster,
 };
+use avian3d::prelude::*;
 
 fn main() {
     App::new()
@@ -13,35 +13,58 @@ fn main() {
             PhysicsPlugins::default(),
         ))
         .insert_resource(ClearColor(Color::srgb(0.35, 0.6, 0.9)))
-        .init_state::<GameState>()
+        // NEW: A 1.5 second timer to hide shader compilation stutter
+        .insert_resource(AssetLoadTimer(Timer::from_seconds(1.5, TimerMode::Once)))
+        
+        // FIXED: Game now defaults to a Loading state
+        .init_state::<GameState>() 
         .add_systems(Startup, setup)
+        
+        // Systems that run all the time
         .add_systems(
             Update,
             (handle_pause_input, lock_cursor_on_click, player_look, update_rotation_ui),
         )
+        
+        // Gameplay systems only run when Playing
         .add_systems(
             Update,
             (player_move, update_fov).run_if(in_state(GameState::Playing)),
         )
-        .add_systems(OnEnter(GameState::Paused), (on_pause, spawn_pause_menu))
-        .add_systems(OnExit(GameState::Paused), (on_resume, despawn_pause_menu))
+        
+        // Loading State Transitions
+        .add_systems(OnEnter(GameState::Loading), spawn_loading_screen)
+        .add_systems(Update, tick_loading.run_if(in_state(GameState::Loading)))
+        .add_systems(OnExit(GameState::Loading), (despawn_loading_screen, capture_cursor))
+        
+        // Paused State Transitions
+        .add_systems(OnEnter(GameState::Paused), (release_cursor, pause_time, spawn_pause_menu))
+        .add_systems(OnExit(GameState::Paused), (capture_cursor, unpause_time, despawn_pause_menu))
+        
         .run();
 }
 
-// --- STATES & COMPONENTS ---
+// --- STATES, TIMERS & COMPONENTS ---
 
 #[derive(States, Default, Debug, Clone, PartialEq, Eq, Hash)]
 enum GameState {
     #[default]
+    Loading, // Game starts here now!
     Playing,
     Paused,
 }
+
+#[derive(Resource)]
+struct AssetLoadTimer(Timer);
 
 #[derive(Component)]
 struct Player;
 
 #[derive(Component)]
 struct CameraPitch(f32);
+
+#[derive(Component)]
+struct LoadingScreen;
 
 #[derive(Component)]
 struct PauseMenu; 
@@ -55,26 +78,30 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    if let Ok(mut cursor) = q_windows.single_mut() {
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
-    }
-
-    // Floor
+    // FIXED: Ground material tweaked for natural light scattering
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(50.0, 1.0, 50.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.2, 0.4, 0.2))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.2, 0.4, 0.2),
+            perceptual_roughness: 0.9, // Very rough, spreads light naturally
+            reflectance: 0.05,         // Low reflection
+            ..default()
+        })),
         Transform::from_xyz(0.0, -0.5, 0.0),
         RigidBody::Static,
         Collider::cuboid(50.0, 1.0, 50.0),
     ));
 
-    // Target Obstacle
+    // FIXED: Obstacle material tweaked to be slightly shiny/glossy
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(4.0, 2.0, 4.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.8, 0.3, 0.3))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.8, 0.2, 0.2), 
+            perceptual_roughness: 0.35, // Smoother, catches sun highlights
+            reflectance: 0.5,
+            ..default()
+        })),
         Transform::from_xyz(5.0, 1.0, -5.0),
         RigidBody::Static,
         Collider::cuboid(4.0, 2.0, 4.0),
@@ -83,11 +110,10 @@ fn setup(
     // --- CELESTIAL BODIES ---
     
     let sun_direction = Vec3::new(1.0, 1.0, 1.0).normalize();
-    // FIXED: Positive Y ensures the moon is actually in the sky, not underground!
     let moon_direction = Vec3::new(-1.0, 0.8, -1.0).normalize(); 
     let sky_distance = 150.0; 
 
-    // 1. The Light Source
+    // Light Source
     commands.spawn((
         DirectionalLight {
             illuminance: 12_000.0,
@@ -98,23 +124,23 @@ fn setup(
             .looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // 2. The Visual Sun
+    // Visual Sun
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(8.0))), 
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.9, 0.2), // Yellow
-            unlit: true, // Retains exact color without HDR blowout
+            base_color: Color::srgb(1.0, 0.9, 0.2),
+            unlit: true,
             ..default()
         })),
         Transform::from_translation(sun_direction * sky_distance),
-        NotShadowCaster, // FIXED: Prevents the giant round shadow
+        NotShadowCaster, 
     ));
 
-    // 3. The Visual Moon
+    // Visual Moon
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(5.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.8, 0.8, 1.0), // Pale blue
+            base_color: Color::srgb(0.8, 0.8, 1.0),
             unlit: true,
             ..default()
         })),
@@ -129,7 +155,6 @@ fn setup(
     let leaves_mat = materials.add(Color::srgb(0.1, 0.4, 0.1));
     let leaves_mesh = meshes.add(Sphere::new(2.5));
 
-    // Random coordinates scattered around the map edges
     let tree_positions = [
         (15.0, -15.0), (-20.0, 10.0), (10.0, 20.0), (-15.0, -20.0),
         (20.0, -5.0), (-10.0, -15.0), (0.0, 22.0), (22.0, 5.0),
@@ -137,7 +162,6 @@ fn setup(
     ];
 
     for (x, z) in tree_positions {
-        // Spawn Trunk (Has physics collider so you can't walk through it)
         commands.spawn((
             Mesh3d(trunk_mesh.clone()),
             MeshMaterial3d(trunk_mat.clone()),
@@ -145,7 +169,6 @@ fn setup(
             RigidBody::Static,
             Collider::cylinder(0.5, 4.0),
         ));
-        // Spawn Leaves (Just visual)
         commands.spawn((
             Mesh3d(leaves_mesh.clone()),
             MeshMaterial3d(leaves_mat.clone()),
@@ -155,11 +178,10 @@ fn setup(
 
     // --- PLAYER & UI SETUP ---
 
-    let initial_pitch = -0.22; // -12.6 degrees down
+    let initial_pitch = -0.22; 
 
     commands.spawn((
         Player,
-        // FIXED: Explicitly set Yaw to -45 degrees to perfectly face the red block
         Transform::from_xyz(0.0, 2.0, 0.0)
             .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4)), 
         RigidBody::Dynamic,
@@ -169,8 +191,12 @@ fn setup(
     )).with_children(|parent| {
         parent.spawn((
             Camera3d::default(),
+            // FIXED: Set the default perspective to 100 degrees FOV (converted to radians)
+            Projection::Perspective(PerspectiveProjection {
+                fov: 100.0_f32.to_radians(),
+                ..default()
+            }),
             CameraPitch(initial_pitch),
-            // FIXED: Explicitly set Pitch to aim down at the block
             Transform::from_xyz(0.0, 0.6, 0.0)
                 .with_rotation(Quat::from_rotation_x(initial_pitch)), 
         ));
@@ -214,6 +240,17 @@ fn setup(
 
 // --- STATE MANAGEMENT ---
 
+fn tick_loading(
+    time: Res<Time>,
+    mut timer: ResMut<AssetLoadTimer>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    // Ticks the timer. Once 1.5 seconds pass, transition to Playing.
+    if timer.0.tick(time.delta()).just_finished() {
+        next_state.set(GameState::Playing);
+    }
+}
+
 fn handle_pause_input(
     state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
@@ -223,6 +260,7 @@ fn handle_pause_input(
         match state.get() {
             GameState::Playing => next_state.set(GameState::Paused),
             GameState::Paused => next_state.set(GameState::Playing),
+            GameState::Loading => {} // Do nothing if we press escape while loading
         }
     }
 }
@@ -240,29 +278,58 @@ fn lock_cursor_on_click(
     }
 }
 
-fn on_pause(
-    mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    mut time: ResMut<Time<Virtual>>,
-) {
-    if let Ok(mut cursor) = q_windows.single_mut() {
-        cursor.grab_mode = CursorGrabMode::None;
-        cursor.visible = true;
-    }
-    time.pause();
-}
-
-fn on_resume(
-    mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    mut time: ResMut<Time<Virtual>>,
-) {
+// Reusable Cursor Logic
+fn capture_cursor(mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>) {
     if let Ok(mut cursor) = q_windows.single_mut() {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }
-    time.unpause();
 }
 
+fn release_cursor(mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    if let Ok(mut cursor) = q_windows.single_mut() {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
+    }
+}
+
+// Reusable Time Logic
+fn pause_time(mut time: ResMut<Time<Virtual>>) { time.pause(); }
+fn unpause_time(mut time: ResMut<Time<Virtual>>) { time.unpause(); }
+
+
 // --- UI SYSTEMS ---
+
+fn spawn_loading_screen(mut commands: Commands) {
+    commands.spawn((
+        LoadingScreen, 
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            position_type: PositionType::Absolute, 
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(Color::BLACK), // Pure black to hide the stuttering game world
+        ZIndex(100), // Forces the loading screen above all other UI elements
+    )).with_children(|parent| {
+        parent.spawn((
+            Text::new("LOADING ASSETS..."),
+            TextFont {
+                font_size: 50.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ));
+    });
+}
+
+fn despawn_loading_screen(mut commands: Commands, query: Query<Entity, With<LoadingScreen>>) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn();
+    }
+}
 
 fn spawn_pause_menu(mut commands: Commands) {
     commands.spawn((
@@ -276,6 +343,7 @@ fn spawn_pause_menu(mut commands: Commands) {
             ..default()
         },
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)), 
+        ZIndex(50),
     )).with_children(|parent| {
         parent.spawn((
             Text::new("PAUSED\nPress ESC to Resume"),
@@ -288,10 +356,7 @@ fn spawn_pause_menu(mut commands: Commands) {
     });
 }
 
-fn despawn_pause_menu(
-    mut commands: Commands,
-    query: Query<Entity, With<PauseMenu>>,
-) {
+fn despawn_pause_menu(mut commands: Commands, query: Query<Entity, With<PauseMenu>>) {
     for entity in query.iter() {
         commands.entity(entity).despawn();
     }
@@ -365,11 +430,12 @@ fn update_fov(
     if let Projection::Perspective(ref mut persp) = *projection {
         let zoom_speed = 2.0 * time.delta_secs(); 
         
+        // FIXED: Expanded constraints to prevent zooming out too far or in too close
         if keyboard.pressed(KeyCode::PageUp) {
-            persp.fov = (persp.fov + zoom_speed).min(2.5); 
+            persp.fov = (persp.fov + zoom_speed).min(120.0_f32.to_radians()); 
         }
         if keyboard.pressed(KeyCode::PageDown) {
-            persp.fov = (persp.fov - zoom_speed).max(0.5); 
+            persp.fov = (persp.fov - zoom_speed).max(30.0_f32.to_radians()); 
         }
     }
 }
