@@ -138,7 +138,6 @@ struct Target {
 #[derive(Component)]
 struct RespawnTimer {
     timer: Timer,
-    pos: Vec3,
 }
 
 #[derive(Component)]
@@ -592,7 +591,7 @@ fn player_move(
         With<Player>,
     >,
 ) {
-    let Ok((entity, transform, mut velocity, mut jump_count, mut dash_cd, mut dash_active)) =
+    let Ok((entity, transform, mut velocity, mut jump_count, mut dash_cd, dash_active)) =
         query.single_mut()
     else {
         return;
@@ -860,7 +859,8 @@ fn bullet_hit_target(
             if mergeable.level > 1 {
                 mergeable.level -= 1;
                 // Update scale and material
-                let scale = 0.7 + (mergeable.level as f32 - 1.0) * 0.1;
+                let base_scale = 0.5;
+                let scale = base_scale * 1.3_f32.powf(mergeable.level as f32 - 1.0);
                 target_transform.scale = Vec3::splat(scale);
                 mat.0 = assets.level_materials
                     [(mergeable.level as usize - 1).min(assets.level_materials.len() - 1)]
@@ -872,7 +872,6 @@ fn bullet_hit_target(
                 }
                 commands.spawn(RespawnTimer {
                     timer: Timer::from_seconds(3.0, TimerMode::Once),
-                    pos: Vec3::ZERO,
                 });
             }
         }
@@ -885,19 +884,29 @@ fn handle_respawns(
     mut timers: Query<(Entity, &mut RespawnTimer)>,
     assets: Res<GameAssets>,
     targets: Query<Entity, With<Target>>,
+    stats: Res<GameStats>,
 ) {
     // 1. Process timers
     for (ent, mut respawn) in timers.iter_mut() {
         if respawn.timer.tick(time.delta()).just_finished() {
-            commands.entity(ent).despawn();
+            if let Ok(mut c) = commands.get_entity(ent) {
+                c.despawn();
+            }
             spawn_new_target(&mut commands, &assets, None);
         }
     }
 
-    // 2. Maintain population (max 200)
-    // Only spawn one per frame to avoid lag spikes if many missing
-    if targets.iter().len() < 200 {
-        spawn_new_target(&mut commands, &assets, None);
+    // 2. Maintain population
+    // Spawn up to 5 per frame to catch up
+    let current_count = targets.iter().len();
+    let max_pop = stats.max_population as usize;
+
+    if current_count < max_pop {
+        let needed = max_pop - current_count;
+        let to_spawn = needed.min(5);
+        for _ in 0..to_spawn {
+            spawn_new_target(&mut commands, &assets, None);
+        }
     }
 }
 
@@ -918,18 +927,18 @@ fn spawn_new_target(
             3 => ShapeType::Capsule,
             _ => ShapeType::Cone,
         };
-        // Default spawn at Level 4 (Green)
-        (Vec3::new(x, 1.0, z), shape, 4, 4)
+        // Random spawn level 1-4
+        let level = (rand::random::<u32>() % 4) + 1;
+        (Vec3::new(x, 1.0, z), shape, level, 4)
     };
 
     let mesh = assets.shape_meshes.get(&shape).unwrap().clone();
     let material =
         assets.level_materials[(level as usize - 1).min(assets.level_materials.len() - 1)].clone();
 
-    // Scale: Level 1=0.25, Volume doubles each level
-    // Scale factor = cuberoot(2) ~= 1.2599
-    let base_scale = 0.25;
-    let scale = base_scale * 1.2599_f32.powf(level as f32 - 1.0);
+    // Scale: Level 1=0.5, Growth factor 1.3
+    let base_scale = 0.5;
+    let scale = base_scale * 1.3_f32.powf(level as f32 - 1.0);
 
     let collider = match shape {
         ShapeType::Cube => Collider::cuboid(1.0, 1.0, 1.0),
@@ -980,8 +989,12 @@ fn handle_merging(
                 // Pick shape from one parent
                 let new_shape = m1.shape;
 
-                commands.entity(e1).despawn();
-                commands.entity(e2).despawn();
+                if let Ok(mut c) = commands.get_entity(e1) {
+                    c.despawn();
+                }
+                if let Ok(mut c) = commands.get_entity(e2) {
+                    c.despawn();
+                }
 
                 processed.insert(e1);
                 processed.insert(e2);
@@ -1270,7 +1283,6 @@ fn handle_oob(
             commands.entity(entity).despawn();
             commands.spawn(RespawnTimer {
                 timer: Timer::from_seconds(3.0, TimerMode::Once),
-                pos: Vec3::ZERO,
             });
         }
     }
@@ -1279,7 +1291,7 @@ fn handle_oob(
 fn check_game_over(mut next_state: ResMut<NextState<GameState>>, target_q: Query<&Mergeable>) {
     // Level 16 is Game Over (Loss)
     for mergeable in target_q.iter() {
-        if mergeable.level >= 16 {
+        if mergeable.level >= 8 {
             next_state.set(GameState::Win); // Using Win state as Game Over
         }
     }
