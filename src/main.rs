@@ -2,7 +2,7 @@ use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
     input::mouse::MouseMotion,
-    light::NotShadowCaster,
+    light::NotShadowCaster, 
 };
 use avian3d::prelude::*;
 
@@ -13,49 +13,64 @@ fn main() {
             PhysicsPlugins::default(),
         ))
         .insert_resource(ClearColor(Color::srgb(0.35, 0.6, 0.9)))
-        // NEW: A 1.5 second timer to hide shader compilation stutter
         .insert_resource(AssetLoadTimer(Timer::from_seconds(1.5, TimerMode::Once)))
-        
-        // FIXED: Game now defaults to a Loading state
+        .insert_resource(GunTimer(Timer::from_seconds(0.15, TimerMode::Repeating)))
         .init_state::<GameState>() 
         .add_systems(Startup, setup)
-        
-        // Systems that run all the time
         .add_systems(
             Update,
             (handle_pause_input, lock_cursor_on_click, player_look, update_rotation_ui),
         )
-        
-        // Gameplay systems only run when Playing
+        // FIXED: Nested the tuples so Bevy's macros don't hit the size limit
         .add_systems(
             Update,
-            (player_move, update_fov).run_if(in_state(GameState::Playing)),
+            (
+                (
+                    player_move, 
+                    update_fov,
+                    handle_shooting,        
+                    despawn_bullets,        
+                ),
+                (
+                    bullet_hit_target,      
+                    handle_respawns,        
+                    handle_grabbing,        
+                    update_grabbed_object,  
+                )
+            ).run_if(in_state(GameState::Playing)),
         )
-        
-        // Loading State Transitions
         .add_systems(OnEnter(GameState::Loading), spawn_loading_screen)
         .add_systems(Update, tick_loading.run_if(in_state(GameState::Loading)))
         .add_systems(OnExit(GameState::Loading), (despawn_loading_screen, capture_cursor))
-        
-        // Paused State Transitions
         .add_systems(OnEnter(GameState::Paused), (release_cursor, pause_time, spawn_pause_menu))
         .add_systems(OnExit(GameState::Paused), (capture_cursor, unpause_time, despawn_pause_menu))
-        
         .run();
 }
 
-// --- STATES, TIMERS & COMPONENTS ---
+// --- STATES, TIMERS, RESOURCES & COMPONENTS ---
 
 #[derive(States, Default, Debug, Clone, PartialEq, Eq, Hash)]
 enum GameState {
     #[default]
-    Loading, // Game starts here now!
+    Loading, 
     Playing,
     Paused,
 }
 
 #[derive(Resource)]
 struct AssetLoadTimer(Timer);
+
+#[derive(Resource)]
+struct GunTimer(Timer);
+
+#[derive(Resource)]
+struct GameAssets {
+    bullet_mesh: Handle<Mesh>,
+    bullet_mat: Handle<StandardMaterial>,
+    target_mesh: Handle<Mesh>,
+    target_mat: Handle<StandardMaterial>,
+    target_transparent_mat: Handle<StandardMaterial>,
+}
 
 #[derive(Component)]
 struct Player;
@@ -72,6 +87,27 @@ struct PauseMenu;
 #[derive(Component)]
 struct RotationText; 
 
+#[derive(Component)]
+struct Bullet;
+
+#[derive(Component)]
+struct Lifetime(Timer);
+
+#[derive(Component)]
+struct Target {
+    health: i32,
+    original_pos: Vec3,
+}
+
+#[derive(Component)]
+struct RespawnTimer {
+    timer: Timer,
+    pos: Vec3,
+}
+
+#[derive(Component)]
+struct Grabbed; 
+
 // --- SYSTEMS ---
 
 fn setup(
@@ -79,13 +115,53 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // FIXED: Ground material tweaked for natural light scattering
+    let game_assets = GameAssets {
+        bullet_mesh: meshes.add(Sphere::new(0.08)),
+        bullet_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.8, 0.0), 
+            emissive: LinearRgba::rgb(2.0, 1.5, 0.0).into(),
+            ..default()
+        }),
+        target_mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        target_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.8, 0.4, 0.1),
+            perceptual_roughness: 0.5,
+            ..default()
+        }),
+        target_transparent_mat: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.8, 0.4, 0.1, 0.5), 
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
+    };
+
+    let target_positions = [
+        Vec3::new(3.0, 1.0, -8.0), Vec3::new(-4.0, 1.0, -7.0),
+        Vec3::new(8.0, 1.0, -3.0), Vec3::new(-9.0, 1.0, -2.0),
+        Vec3::new(6.0, 1.0, 4.0),  Vec3::new(-7.0, 1.0, 5.0),
+        Vec3::new(2.0, 1.0, 9.0),  Vec3::new(-3.0, 1.0, 8.0),
+        Vec3::new(10.0, 1.0, -10.0), Vec3::new(-10.0, 1.0, 10.0),
+    ];
+
+    for pos in target_positions {
+        commands.spawn((
+            Target { health: 3, original_pos: pos },
+            Mesh3d(game_assets.target_mesh.clone()),
+            MeshMaterial3d(game_assets.target_mat.clone()),
+            Transform::from_translation(pos),
+            RigidBody::Dynamic,
+            Collider::cuboid(1.0, 1.0, 1.0),
+        ));
+    }
+
+    commands.insert_resource(game_assets);
+
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(50.0, 1.0, 50.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.2, 0.4, 0.2),
-            perceptual_roughness: 0.9, // Very rough, spreads light naturally
-            reflectance: 0.05,         // Low reflection
+            perceptual_roughness: 0.9, 
+            reflectance: 0.05,         
             ..default()
         })),
         Transform::from_xyz(0.0, -0.5, 0.0),
@@ -93,12 +169,11 @@ fn setup(
         Collider::cuboid(50.0, 1.0, 50.0),
     ));
 
-    // FIXED: Obstacle material tweaked to be slightly shiny/glossy
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(4.0, 2.0, 4.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.8, 0.2, 0.2), 
-            perceptual_roughness: 0.35, // Smoother, catches sun highlights
+            perceptual_roughness: 0.35, 
             reflectance: 0.5,
             ..default()
         })),
@@ -107,13 +182,10 @@ fn setup(
         Collider::cuboid(4.0, 2.0, 4.0),
     ));
 
-    // --- CELESTIAL BODIES ---
-    
     let sun_direction = Vec3::new(1.0, 1.0, 1.0).normalize();
     let moon_direction = Vec3::new(-1.0, 0.8, -1.0).normalize(); 
     let sky_distance = 150.0; 
 
-    // Light Source
     commands.spawn((
         DirectionalLight {
             illuminance: 12_000.0,
@@ -124,7 +196,6 @@ fn setup(
             .looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Visual Sun
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(8.0))), 
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -136,7 +207,6 @@ fn setup(
         NotShadowCaster, 
     ));
 
-    // Visual Moon
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(5.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -147,8 +217,6 @@ fn setup(
         Transform::from_translation(moon_direction * sky_distance),
         NotShadowCaster, 
     ));
-
-    // --- TREES ---
 
     let trunk_mat = materials.add(Color::srgb(0.4, 0.2, 0.0));
     let trunk_mesh = meshes.add(Cylinder::new(0.5, 4.0));
@@ -176,8 +244,6 @@ fn setup(
         ));
     }
 
-    // --- PLAYER & UI SETUP ---
-
     let initial_pitch = -0.22; 
 
     commands.spawn((
@@ -191,7 +257,6 @@ fn setup(
     )).with_children(|parent| {
         parent.spawn((
             Camera3d::default(),
-            // FIXED: Set the default perspective to 100 degrees FOV (converted to radians)
             Projection::Perspective(PerspectiveProjection {
                 fov: 100.0_f32.to_radians(),
                 ..default()
@@ -202,7 +267,6 @@ fn setup(
         ));
     });
 
-    // Crosshair
     commands.spawn(Node {
         width: Val::Percent(100.0),
         height: Val::Percent(100.0),
@@ -220,7 +284,6 @@ fn setup(
         ));
     });
 
-    // Top-Left Rotation UI
     commands.spawn((
         Text::new("Yaw: 0.0 deg\nPitch: 0.0 deg\nFOV: 0.0"),
         TextFont {
@@ -245,7 +308,6 @@ fn tick_loading(
     mut timer: ResMut<AssetLoadTimer>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
-    // Ticks the timer. Once 1.5 seconds pass, transition to Playing.
     if timer.0.tick(time.delta()).just_finished() {
         next_state.set(GameState::Playing);
     }
@@ -260,7 +322,7 @@ fn handle_pause_input(
         match state.get() {
             GameState::Playing => next_state.set(GameState::Paused),
             GameState::Paused => next_state.set(GameState::Playing),
-            GameState::Loading => {} // Do nothing if we press escape while loading
+            GameState::Loading => {} 
         }
     }
 }
@@ -278,7 +340,6 @@ fn lock_cursor_on_click(
     }
 }
 
-// Reusable Cursor Logic
 fn capture_cursor(mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>) {
     if let Ok(mut cursor) = q_windows.single_mut() {
         cursor.grab_mode = CursorGrabMode::Locked;
@@ -293,10 +354,8 @@ fn release_cursor(mut q_windows: Query<&mut CursorOptions, With<PrimaryWindow>>)
     }
 }
 
-// Reusable Time Logic
 fn pause_time(mut time: ResMut<Time<Virtual>>) { time.pause(); }
 fn unpause_time(mut time: ResMut<Time<Virtual>>) { time.unpause(); }
-
 
 // --- UI SYSTEMS ---
 
@@ -311,8 +370,8 @@ fn spawn_loading_screen(mut commands: Commands) {
             justify_content: JustifyContent::Center,
             ..default()
         },
-        BackgroundColor(Color::BLACK), // Pure black to hide the stuttering game world
-        ZIndex(100), // Forces the loading screen above all other UI elements
+        BackgroundColor(Color::BLACK), 
+        ZIndex(100), 
     )).with_children(|parent| {
         parent.spawn((
             Text::new("LOADING ASSETS..."),
@@ -372,7 +431,6 @@ fn update_rotation_ui(
     let Ok(mut text) = text_q.single_mut() else { return };
 
     let (yaw, _, _) = player_transform.rotation.to_euler(EulerRot::YXZ);
-    
     let current_fov = match projection {
         Projection::Perspective(p) => p.fov.to_degrees(),
         _ => 0.0,
@@ -426,11 +484,8 @@ fn update_fov(
     mut q_camera: Query<&mut Projection, With<Camera3d>>,
 ) {
     let Ok(mut projection) = q_camera.single_mut() else { return };
-    
     if let Projection::Perspective(ref mut persp) = *projection {
         let zoom_speed = 2.0 * time.delta_secs(); 
-        
-        // FIXED: Expanded constraints to prevent zooming out too far or in too close
         if keyboard.pressed(KeyCode::PageUp) {
             persp.fov = (persp.fov + zoom_speed).min(120.0_f32.to_radians()); 
         }
@@ -453,7 +508,6 @@ fn player_look(
 
     let Ok(cursor) = primary_window.single() else { return };
     if cursor.grab_mode == CursorGrabMode::None { return; }
-
     if delta == Vec2::ZERO { return; }
 
     let sensitivity = 0.002;
@@ -465,5 +519,179 @@ fn player_look(
     if let Ok((mut camera_transform, mut pitch)) = camera_query.single_mut() {
         pitch.0 = (pitch.0 - delta.y * sensitivity).clamp(-1.54, 1.54);
         camera_transform.rotation = Quat::from_rotation_x(pitch.0);
+    }
+}
+
+// --- NEW COMBAT & INTERACTION SYSTEMS ---
+
+fn handle_shooting(
+    mut commands: Commands,
+    mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
+    mut gun_timer: ResMut<GunTimer>,
+    camera_q: Query<&GlobalTransform, With<Camera3d>>,
+    assets: Res<GameAssets>,
+) {
+    let Ok(cam_transform) = camera_q.single() else { return };
+
+    if mouse.pressed(MouseButton::Left) {
+        gun_timer.0.tick(time.delta());
+        if gun_timer.0.just_finished() {
+            let forward = cam_transform.forward();
+            let right = cam_transform.right();
+            let up = cam_transform.up();
+            
+            let spawn_pos = cam_transform.translation() + forward * 1.0 + right * 0.4 - up * 0.3;
+
+            commands.spawn((
+                Mesh3d(assets.bullet_mesh.clone()),
+                MeshMaterial3d(assets.bullet_mat.clone()),
+                Transform::from_translation(spawn_pos),
+                RigidBody::Dynamic,
+                Collider::sphere(0.08),
+                GravityScale(0.1), 
+                LinearVelocity(forward * 50.0),
+                Bullet,
+                Lifetime(Timer::from_seconds(2.0, TimerMode::Once)),
+            ));
+        }
+    } else {
+        let duration = gun_timer.0.duration();
+        gun_timer.0.set_elapsed(duration);
+    }
+}
+
+fn despawn_bullets(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut bullets: Query<(Entity, &mut Lifetime)>,
+) {
+    for (entity, mut lifetime) in bullets.iter_mut() {
+        if lifetime.0.tick(time.delta()).just_finished() {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+fn bullet_hit_target(
+    mut commands: Commands,
+    mut collision_events: MessageReader<CollisionStart>,
+    bullet_q: Query<Entity, With<Bullet>>,
+    mut target_q: Query<(Entity, &mut Target, &mut Transform)>,
+) {
+    for collision in collision_events.read() {
+        let (bullet, target) = if bullet_q.contains(collision.collider1) && target_q.contains(collision.collider2) {
+            (collision.collider1, collision.collider2)
+        } else if bullet_q.contains(collision.collider2) && target_q.contains(collision.collider1) {
+            (collision.collider2, collision.collider1)
+        } else {
+            continue;
+        };
+
+        // FIXED: Now expecting Ok() instead of Some()
+        if let Ok(mut cmds) = commands.get_entity(bullet) {
+            cmds.despawn();
+        }
+
+        if let Ok((target_ent, mut target_data, mut target_transform)) = target_q.get_mut(target) {
+            target_data.health -= 1;
+            if target_data.health <= 0 {
+                let original_pos = target_data.original_pos;
+                // FIXED: Now expecting Ok() instead of Some()
+                if let Ok(mut cmds) = commands.get_entity(target_ent) {
+                    cmds.despawn();
+                }
+                commands.spawn(RespawnTimer {
+                    timer: Timer::from_seconds(5.0, TimerMode::Once),
+                    pos: original_pos,
+                });
+            } else {
+                target_transform.scale *= 0.69; 
+            }
+        }
+    }
+}
+
+fn handle_respawns(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut timers: Query<(Entity, &mut RespawnTimer)>,
+    assets: Res<GameAssets>,
+) {
+    for (ent, mut respawn) in timers.iter_mut() {
+        if respawn.timer.tick(time.delta()).just_finished() {
+            commands.entity(ent).despawn();
+            commands.spawn((
+                Target { health: 3, original_pos: respawn.pos },
+                Mesh3d(assets.target_mesh.clone()),
+                MeshMaterial3d(assets.target_mat.clone()),
+                Transform::from_translation(respawn.pos),
+                RigidBody::Dynamic,
+                Collider::cuboid(1.0, 1.0, 1.0),
+            ));
+        }
+    }
+}
+
+fn handle_grabbing(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    camera_q: Query<&GlobalTransform, With<Camera3d>>,
+    grabbed_q: Query<Entity, With<Grabbed>>,
+    target_q: Query<Entity, With<Target>>,
+    spatial_query: SpatialQuery,
+    assets: Res<GameAssets>,
+) {
+    let Ok(cam_transform) = camera_q.single() else { return };
+
+    if keyboard.just_pressed(KeyCode::KeyE) {
+        if let Ok(grabbed_ent) = grabbed_q.single() {
+            commands.entity(grabbed_ent)
+                .remove::<Grabbed>()
+                .insert(RigidBody::Dynamic) 
+                .insert(MeshMaterial3d(assets.target_mat.clone())); 
+        } else {
+            let ray_origin = cam_transform.translation();
+            let ray_dir = cam_transform.forward();
+            
+            if let Some(hit) = spatial_query.cast_ray(
+                ray_origin,
+                ray_dir,
+                1000.0, 
+                true,
+                &SpatialQueryFilter::default(),
+            ) {
+                if target_q.contains(hit.entity) {
+                    commands.entity(hit.entity)
+                        .insert(Grabbed)
+                        .insert(RigidBody::Kinematic) 
+                        .insert(LinearVelocity::ZERO) 
+                        .insert(AngularVelocity::ZERO)
+                        .insert(MeshMaterial3d(assets.target_transparent_mat.clone())); 
+                }
+            }
+        }
+    }
+
+    if keyboard.just_pressed(KeyCode::KeyQ) {
+        if let Ok(grabbed_ent) = grabbed_q.single() {
+            commands.entity(grabbed_ent)
+                .remove::<Grabbed>()
+                .insert(RigidBody::Dynamic)
+                .insert(LinearVelocity(cam_transform.forward() * 30.0)) 
+                .insert(MeshMaterial3d(assets.target_mat.clone()));
+        }
+    }
+}
+
+fn update_grabbed_object(
+    camera_q: Query<&GlobalTransform, With<Camera3d>>,
+    mut grabbed_q: Query<&mut Transform, With<Grabbed>>,
+    time: Res<Time>,
+) {
+    let Ok(cam_transform) = camera_q.single() else { return };
+    if let Ok(mut transform) = grabbed_q.single_mut() {
+        let hold_pos = cam_transform.translation() + cam_transform.forward() * 2.5;
+        transform.translation = transform.translation.lerp(hold_pos, 20.0 * time.delta_secs());
     }
 }
