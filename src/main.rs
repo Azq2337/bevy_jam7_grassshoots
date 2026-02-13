@@ -13,6 +13,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.35, 0.6, 0.9)))
         .insert_resource(AssetLoadTimer(Timer::from_seconds(1.5, TimerMode::Once)))
         .insert_resource(GunTimer(Timer::from_seconds(0.15, TimerMode::Repeating)))
+        .insert_resource(ShotBlocker(Timer::from_seconds(0.0, TimerMode::Once)))
         .init_state::<GameState>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -40,6 +41,7 @@ fn main() {
                 update_gun,
                 handle_oob,
                 check_win_condition,
+                tick_shot_blocker,
             )
                 .run_if(in_state(GameState::Playing)),
         )
@@ -150,7 +152,12 @@ enum ShapeType {
     Cylinder,
     Capsule,
     Cone,
+    Torus,
+    Tetrahedron,
 }
+
+#[derive(Resource)]
+struct ShotBlocker(Timer);
 
 #[derive(Component)]
 struct Mergeable {
@@ -179,7 +186,10 @@ fn setup(
     shape_meshes.insert(ShapeType::Sphere, meshes.add(Sphere::new(0.5)));
     shape_meshes.insert(ShapeType::Cylinder, meshes.add(Cylinder::new(0.5, 1.0)));
     shape_meshes.insert(ShapeType::Capsule, meshes.add(Capsule3d::new(0.5, 1.0)));
+    shape_meshes.insert(ShapeType::Capsule, meshes.add(Capsule3d::new(0.5, 1.0)));
     shape_meshes.insert(ShapeType::Cone, meshes.add(Cone::new(0.5, 1.0)));
+    shape_meshes.insert(ShapeType::Torus, meshes.add(Torus::new(0.3, 0.7)));
+    shape_meshes.insert(ShapeType::Tetrahedron, meshes.add(Tetrahedron::default()));
 
     let mut level_materials = Vec::new();
     // Colors for levels 1-8 (Rainbow: Red -> Purple)
@@ -749,9 +759,10 @@ fn handle_shooting(
     camera_q: Query<&GlobalTransform, With<Camera3d>>,
     assets: Res<GameAssets>,
     grabbed_q: Query<Entity, With<Grabbed>>,
+    shot_blocker: Res<ShotBlocker>,
 ) {
-    // Disable shooting if holding an object
-    if !grabbed_q.is_empty() {
+    // Disable shooting if holding an object or blocked
+    if !grabbed_q.is_empty() || shot_blocker.0.elapsed() < shot_blocker.0.duration() {
         return;
     }
 
@@ -872,9 +883,9 @@ fn handle_respawns(
         }
     }
 
-    // 2. Maintain population (max 100)
+    // 2. Maintain population (max 200)
     // Only spawn one per frame to avoid lag spikes if many missing
-    if targets.iter().len() < 100 {
+    if targets.iter().len() < 200 {
         spawn_new_target(&mut commands, &assets, None);
     }
 }
@@ -904,8 +915,10 @@ fn spawn_new_target(
     let material =
         assets.level_materials[(level as usize - 1).min(assets.level_materials.len() - 1)].clone();
 
-    // Scale: Level 1=0.7, Level 4=1.0, Level 8=1.4
-    let scale = 0.7 + (level as f32 - 1.0) * 0.1;
+    // Scale: Level 1=0.15, Levels double each time.
+    // Lvl 1=0.15, Lvl 4=1.2, Lvl 8=19.2
+    let base_scale = 0.15;
+    let scale = base_scale * 2.0_f32.powf(level as f32 - 1.0);
 
     let collider = match shape {
         ShapeType::Cube => Collider::cuboid(1.0, 1.0, 1.0),
@@ -913,6 +926,7 @@ fn spawn_new_target(
         ShapeType::Cylinder => Collider::cylinder(0.5, 1.0),
         ShapeType::Capsule => Collider::capsule(0.5, 1.0),
         ShapeType::Cone => Collider::cone(0.5, 1.0),
+        _ => Collider::sphere(0.7), // Fallback/Torus/Tetrahedron
     };
 
     commands.spawn((
@@ -1018,7 +1032,7 @@ fn handle_grabbing(
     spatial_query: SpatialQuery,
     assets: Res<GameAssets>,
     player_q: Query<Entity, With<Player>>,
-    mut gun_timer: ResMut<GunTimer>,
+    mut shot_blocker: ResMut<ShotBlocker>,
 ) {
     let Ok(cam_transform) = camera_q.single() else {
         return;
@@ -1094,6 +1108,10 @@ fn update_grabbed_object(
             .translation
             .lerp(hold_pos, 20.0 * time.delta_secs());
     }
+}
+
+fn tick_shot_blocker(mut shot_blocker: ResMut<ShotBlocker>, time: Res<Time>) {
+    shot_blocker.0.tick(time.delta());
 }
 
 fn handle_pause_buttons(
