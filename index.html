@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grass Shoots</title>
+    <style>
+        body { margin: 0; background-color: black; overflow: hidden; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        /* Optional: Hide scrollbars and ensure focus */
+    </style>
+</head>
+<body>
+    <script type="module">
+        import init from './grass_shoots.js';
+        
+        // This function starts the game
+        async function run() {
+            await init();
+        }
+        run();
+    </script>
+</body>
+</html>

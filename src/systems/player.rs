@@ -183,6 +183,7 @@ pub fn update_fov(
     mut camera_q: Query<&mut Projection, With<Camera3d>>,
     player_q: Query<&LinearVelocity, With<Player>>,
     time: Res<Time>,
+    mouse: Res<ButtonInput<MouseButton>>,
 ) {
     let Some(mut projection) = camera_q.iter_mut().next() else {
         return;
@@ -193,8 +194,14 @@ pub fn update_fov(
 
     if let Projection::Perspective(ref mut perspective) = *projection {
         let speed = velocity.0.length();
-        let target_fov = 100.0_f32.to_radians() + (speed * 0.005); // dynamic FOV
-        perspective.fov = perspective.fov.lerp(target_fov, 5.0 * time.delta_secs());
+
+        let target_fov = if mouse.pressed(MouseButton::Right) {
+            70.0_f32.to_radians()
+        } else {
+            100.0_f32.to_radians() + (speed * 0.005)
+        };
+
+        perspective.fov = perspective.fov.lerp(target_fov, 10.0 * time.delta_secs());
     }
 }
 

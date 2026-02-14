@@ -30,6 +30,7 @@ fn main() {
         })
         .insert_resource(HighScores::default())
         .insert_resource(GameMode::default())
+        .insert_resource(StableRunMode(true))
         .insert_resource(menu::SelectedDifficulty(8))
         .init_state::<GameState>()
         .add_systems(Startup, setup::setup)

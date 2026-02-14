@@ -19,6 +19,9 @@ pub enum GameMode {
     Survival { target_level: u32 },
 }
 
+#[derive(Resource, Default)]
+pub struct StableRunMode(pub bool);
+
 impl Default for GameMode {
     fn default() -> Self {
         GameMode::MergeToWin { target_level: 8 }

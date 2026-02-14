@@ -10,12 +10,12 @@ rand = "0.10.0"
 
 # CRITICAL FIX FOR WEB:
 # Allows 'rand' to work in the browser by using JavaScript's Math.random()
-# getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 # OPTIMIZATION (Required for Web):
 # Without this, your game will be ~100MB+ and freeze the browser while loading.
-# [profile.release]
-# opt-level = "z"   # Optimize for small size
-# lto = true        # Enable Link Time Optimization
-# codegen-units = 1 # Slower build, smaller binary
-# strip = true      # Remove debug symbols
+[profile.release]
+opt-level = "z"   # Optimize for small size
+lto = true        # Enable Link Time Optimization
+strip = true      # Remove debug symbols
+codegen-units = 1 # Slower build, smaller binary

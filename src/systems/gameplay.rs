@@ -76,6 +76,8 @@ pub fn handle_respawns(
     assets: Res<GameAssets>,
     targets: Query<Entity, With<Target>>,
     stats: Res<GameStats>,
+    stable_run: Res<StableRunMode>,
+    game_mode: Res<GameMode>,
     listener_q: Query<&GlobalTransform, With<SpatialListener>>,
 ) {
     let listener_pos = listener_q.iter().next().map(|tr| tr.translation());
@@ -93,10 +95,20 @@ pub fn handle_respawns(
     // 2. Maintain population
     // Spawn up to 5 per frame to catch up
     let current_count = targets.iter().len();
-    let max_pop = stats.max_population as usize;
+    let pending_timers = timers.iter().len();
+    let total_potential_pop = current_count + pending_timers;
 
-    if current_count < max_pop {
-        let needed = max_pop - current_count;
+    let mut max_pop = stats.max_population as usize;
+
+    if stable_run.0 {
+        max_pop = match *game_mode {
+            GameMode::MergeToWin { .. } => 600,
+            GameMode::Survival { .. } => 100,
+        };
+    }
+
+    if total_potential_pop < max_pop {
+        let needed = max_pop - total_potential_pop;
         let to_spawn = needed.min(5);
         for _ in 0..to_spawn {
             spawn_new_target(&mut commands, &assets, None, listener_pos);
