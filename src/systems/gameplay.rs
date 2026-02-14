@@ -164,8 +164,8 @@ pub fn spawn_new_target(
         if dist > 3.0 {
             0.0
         } else {
-            // Linear dropoff from 0 to 3m
-            0.8 * (1.0 - (dist / 3.0)).clamp(0.0, 1.0)
+            // Linear dropoff from 0 to 3m (boosted base volume)
+            3.0 * (1.0 - (dist / 3.0)).clamp(0.0, 1.0)
         }
     } else {
         0.0 // Silent on startup
@@ -240,13 +240,13 @@ pub fn handle_merging(
 
                 // Play merge sound (spatial with cutoff)
                 let volume = if is_held_merge {
-                    1.0
+                    4.0
                 } else if let Some(l_pos) = listener_pos {
                     let dist = new_pos.distance(l_pos);
                     if dist > 3.0 {
                         0.0
                     } else {
-                        1.0 * (1.0 - (dist / 3.0)).clamp(0.0, 1.0)
+                        4.0 * (1.0 - (dist / 3.0)).clamp(0.0, 1.0)
                     }
                 } else {
                     0.0

@@ -36,7 +36,7 @@ pub fn spawn_menu_screen(mut commands: Commands, selected_difficulty: Res<Select
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("BEVY GEMINI"),
+                Text::new("GRASS SHOOTS"),
                 TextFont {
                     font_size: 60.0,
                     ..default()
@@ -204,7 +204,7 @@ pub fn handle_menu_interaction(
             Interaction::Pressed => {
                 commands.spawn((
                     AudioPlayer::new(assets.click.clone()),
-                    PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(0.3)),
+                    PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(0.1)),
                 ));
 
                 match action {

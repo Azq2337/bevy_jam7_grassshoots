@@ -10,7 +10,16 @@ use crate::systems::{gameplay, menu, player, setup, ui};
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, PhysicsPlugins::default()))
+        .add_plugins((
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Grass Shoots".into(),
+                    ..default()
+                }),
+                ..default()
+            }),
+            PhysicsPlugins::default(),
+        ))
         .insert_resource(ClearColor(Color::srgb(0.35, 0.6, 0.9)))
         .insert_resource(AssetLoadTimer(Timer::from_seconds(1.5, TimerMode::Once)))
         .insert_resource(GunTimer(Timer::from_seconds(0.15, TimerMode::Repeating)))

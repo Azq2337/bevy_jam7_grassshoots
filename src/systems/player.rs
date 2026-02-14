@@ -10,7 +10,11 @@ pub fn player_look(
     mut camera_q: Query<(&mut Transform, &mut CameraPitch), (With<Camera3d>, Without<Player>)>,
     mut mouse_motion: MessageReader<bevy::input::mouse::MouseMotion>,
     _time: Res<Time>,
+    state: Res<State<GameState>>,
 ) {
+    if *state.get() != GameState::Playing {
+        return;
+    }
     let Some(mut player_transform) = player_q.iter_mut().next() else {
         return;
     };
@@ -133,7 +137,22 @@ pub fn player_move(
 
     if keys.just_pressed(KeyCode::ShiftLeft) && dash_cd.0.elapsed() >= dash_cd.0.duration() {
         dash_cd.0.reset();
-        velocity.0 = move_dir * 50.0;
+
+        let dash_dir = if is_moving {
+            move_dir
+        } else {
+            // Use forward direction relative to flattened Y
+            let fwd = transform.forward();
+            let mut flat_fwd = Vec3::new(fwd.x, 0.0, fwd.z);
+            if flat_fwd.length_squared() > 0.001 {
+                flat_fwd = flat_fwd.normalize();
+            } else {
+                flat_fwd = Vec3::Z; // Fallback
+            }
+            flat_fwd
+        };
+
+        velocity.0 = dash_dir * 50.0;
         // Play dash sound (footstep)
         commands.spawn((
             AudioPlayer::new(assets.footstep.clone()),
@@ -226,7 +245,7 @@ pub fn handle_shooting(
             // Play shoot sound
             commands.spawn((
                 AudioPlayer::new(assets.shoot.clone()),
-                PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(3.0)),
+                PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(8.0)),
             ));
         }
     }

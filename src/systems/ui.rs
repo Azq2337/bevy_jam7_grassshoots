@@ -118,20 +118,14 @@ pub fn update_rotation_ui(
     game_mode: Res<GameMode>,
     time: Res<Time>,
 ) {
-    let Ok((player_transform, dash_cd, dash_active)) = player_q.single() else {
+    let Ok((_player_transform, dash_cd, dash_active)) = player_q.single() else {
         return;
     };
-    let Ok((pitch, projection)) = camera_q.single() else {
+    let Ok((_pitch, _projection)) = camera_q.single() else {
         return;
     };
     let Ok(mut text) = text_q.single_mut() else {
         return;
-    };
-
-    let (yaw, _, _) = player_transform.rotation.to_euler(EulerRot::YXZ);
-    let current_fov = match projection {
-        Projection::Perspective(p) => p.fov.to_degrees(),
-        _ => 0.0,
     };
 
     let dash_status = if dash_active.is_some() {
@@ -152,16 +146,8 @@ pub fn update_rotation_ui(
     let elapsed = time.elapsed_secs() - stats.start_time;
 
     text.0 = format!(
-        "Mode: {}\nObjects: {} / {:.0}\nTime: {:.1}s\nPos: {:.1}\nYaw: {:.1} deg\nPitch: {:.1} deg\nFOV: {:.1}\nDash: {}",
-        mode_str,
-        object_count,
-        stats.max_population,
-        elapsed,
-        player_transform.translation,
-        yaw.to_degrees(),
-        pitch.0.to_degrees(),
-        current_fov,
-        dash_status
+        "Mode: {}\nObjects: {} / {:.0}\nTime: {:.1}s\nDash: {}",
+        mode_str, object_count, stats.max_population, elapsed, dash_status
     );
 }
 

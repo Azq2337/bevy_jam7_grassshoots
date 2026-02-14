@@ -7,7 +7,7 @@ pub struct Player;
 pub struct DashCooldown(pub Timer);
 
 #[derive(Component)]
-pub struct DashActive(pub Timer);
+pub struct DashActive;//(pub Timer);
 
 #[derive(Component)]
 pub struct JumpCount(pub u32);
