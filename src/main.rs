@@ -14,6 +14,7 @@ fn main() {
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Grass Shoots".into(),
+                    fit_canvas_to_parent: true,
                     ..default()
                 }),
                 ..default()
@@ -88,7 +89,7 @@ fn main() {
                 player::despawn_bullets,
                 gameplay::bullet_hit_target,
                 gameplay::handle_respawns,
-                gameplay::handle_grabbing,
+                gameplay::handle_grabbing.before(gameplay::handle_merging),
                 gameplay::update_grabbed_object,
                 gameplay::handle_merging,
                 gameplay::update_gun,

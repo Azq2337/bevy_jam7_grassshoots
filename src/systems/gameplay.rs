@@ -102,7 +102,7 @@ pub fn handle_respawns(
 
     if stable_run.0 {
         max_pop = match *game_mode {
-            GameMode::MergeToWin { .. } => 600,
+            GameMode::MergeToWin { .. } => 400,
             GameMode::Survival { .. } => 100,
         };
     }
