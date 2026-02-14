@@ -1,13 +1,13 @@
-Fresh newbie using this jam to learn Rust and Bevy.
-Vibe coded using Antigravity.
+Fresh newbie using this game jam to learn Rust and Bevy.
+
+Vibe coded using Antigravity Gemini 3 pro model.
+
+![coverart](assets/images/coverart.png)
 
 ---
 # Asset used:
-### BGM:
-https://incompetech.com/music/royalty-free/music.html
-### SFX:
-https://www.kenney.nl/assets/interface-sounds
-https://www.kenney.nl/assets/impact-sounds
+BGM: https://incompetech.com/music/royalty-free/music.html
+SFX: https://www.kenney.nl
 
 ---
 # Wasm build:
@@ -27,13 +27,13 @@ wasm-server-runner target/wasm32-unknown-unknown/release/grass_shoots.wasm
 ```
 
 - Collect Files: Your ./out directory should now contain:
-    index.html
-    grass_shoots.js
-    grass_shoots_bg.wasm
-    The assets folder (containing your sounds and models).
+    - index.html
+    - grass_shoots.js
+    - grass_shoots_bg.wasm
+    - The assets folder (containing your sounds and models).
 - Go inside the out folder and zip everything.
 - Upload:
-    Go to your itch.io project page.
-    Set Kind of project to HTML.
-    Upload the ZIP.
-    Check the box "This file will be played in the browser".
+    - Go to your itch.io project page.
+    - Set Kind of project to HTML.
+    - Upload the ZIP.
+    - Check the box "This file will be played in the browser".
