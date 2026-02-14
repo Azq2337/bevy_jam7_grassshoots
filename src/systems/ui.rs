@@ -116,6 +116,7 @@ pub fn update_rotation_ui(
     stats: Res<GameStats>,
     targets_q: Query<Entity, With<Target>>,
     game_mode: Res<GameMode>,
+    time: Res<Time>,
 ) {
     let Ok((player_transform, dash_cd, dash_active)) = player_q.single() else {
         return;
@@ -142,28 +143,20 @@ pub fn update_rotation_ui(
     };
 
     let mode_str = match *game_mode {
-        GameMode::MergeToWin => "Merge to Win (Lvl 8)",
-        GameMode::Survival => "Survival (No Lvl 8)",
+        GameMode::MergeToWin { target_level } => format!("Merge to Win (Lvl {})", target_level),
+        GameMode::Survival { target_level } => format!("Survival (No Lvl {})", target_level),
     };
 
     let object_count = targets_q.iter().len();
 
-    // Top Right: Controls (Already handled by RotationText position?)
-    // User asked for "Top Right: Control Guide" and "Top Left: Info"
-    // Currently RotationText is at Top Left (10px, 10px).
-    // Let's repurpose RotationText to be the Top Left Info.
+    let elapsed = time.elapsed_secs() - stats.start_time;
 
     text.0 = format!(
         "Mode: {}\nObjects: {} / {:.0}\nTime: {:.1}s\nPos: {:.1}\nYaw: {:.1} deg\nPitch: {:.1} deg\nFOV: {:.1}\nDash: {}",
         mode_str,
         object_count,
         stats.max_population,
-        stats.start_time, // This is just start time, creates confusing output. Should be elapsed.
-        // Wait, stats.start_time is f32 timestamp? No, it's initialized to 0.0.
-        // "start_time: time.elapsed_secs()" in restart action.
-        // So elapsed = time.elapsed_secs() - stats.start_time.
-        // We'll fix this in next step when we have access to Time resource here.
-        // Wait, update_rotation_ui signature doesn't have Time. I need to add it.
+        elapsed,
         player_transform.translation,
         yaw.to_degrees(),
         pitch.0.to_degrees(),
@@ -171,9 +164,6 @@ pub fn update_rotation_ui(
         dash_status
     );
 }
-
-// Helper to fix the time issue in update_rotation_ui
-// I'll rewrite update_rotation_ui later with Time resource.
 
 pub fn tick_loading(
     time: Res<Time>,
@@ -237,13 +227,48 @@ pub fn spawn_win_screen(
     mut commands: Commands,
     time: Res<Time>,
     stats: Res<GameStats>,
-    mut high_score: ResMut<HighScore>,
+    mut high_scores: ResMut<HighScores>,
+    game_mode: Res<GameMode>,
+    assets: Res<GameAssets>,
 ) {
-    // Game Over Screen
     let elapsed = time.elapsed_secs() - stats.start_time;
-    if elapsed > high_score.0 {
-        high_score.0 = elapsed;
-    }
+
+    let (title_text, title_color, score_text, record_text) = match *game_mode {
+        GameMode::MergeToWin { .. } => {
+            // Check record (Lowest time is best)
+            if high_scores.merge_to_win_best_time == 0.0
+                || elapsed < high_scores.merge_to_win_best_time
+            {
+                high_scores.merge_to_win_best_time = elapsed;
+            }
+            commands.spawn((
+                AudioPlayer::new(assets.win.clone()),
+                PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(2.0)),
+            ));
+            (
+                "YOU WIN!",
+                Color::srgb(0.0, 1.0, 0.0), // Green
+                format!("Time: {:.2}s", elapsed),
+                format!("Fastest Win: {:.2}s", high_scores.merge_to_win_best_time),
+            )
+        }
+        GameMode::Survival { .. } => {
+            // Check record (Highest time is best)
+            if elapsed > high_scores.survival_max_time {
+                high_scores.survival_max_time = elapsed;
+            }
+            commands.spawn((
+                AudioPlayer::new(assets.game_over.clone()),
+                PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(2.0)),
+            ));
+            (
+                "GAME OVER",
+                Color::srgb(1.0, 0.0, 0.0), // Red
+                format!("Survived: {:.2}s", elapsed),
+                format!("Longest Survival: {:.2}s", high_scores.survival_max_time),
+            )
+        }
+    };
 
     commands
         .spawn((
@@ -261,15 +286,15 @@ pub fn spawn_win_screen(
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("GAME OVER"),
+                Text::new(title_text),
                 TextFont {
                     font_size: 80.0,
                     ..default()
                 },
-                TextColor(Color::srgb(1.0, 0.0, 0.0)), // Red for loss
+                TextColor(title_color),
             ));
             parent.spawn((
-                Text::new(format!("Survival Time: {:.2}s", elapsed)),
+                Text::new(score_text),
                 TextFont {
                     font_size: 40.0,
                     ..default()
@@ -277,7 +302,7 @@ pub fn spawn_win_screen(
                 TextColor(Color::WHITE),
             ));
             parent.spawn((
-                Text::new(format!("Personal Record: {:.2}s", high_score.0)),
+                Text::new(record_text),
                 TextFont {
                     font_size: 30.0,
                     ..default()
@@ -316,6 +341,7 @@ pub fn despawn_win_screen(mut commands: Commands, query: Query<Entity, With<WinS
 }
 
 pub fn handle_win_input(
+    mut commands: Commands,
     mut interaction_query: Query<
         (&Interaction, &mut BackgroundColor, &PauseButtonAction),
         (Changed<Interaction>, With<Button>),
@@ -324,16 +350,17 @@ pub fn handle_win_input(
     mut load_timer: ResMut<AssetLoadTimer>,
     mut stats: ResMut<GameStats>,
     time: Res<Time>,
+    assets: Res<GameAssets>,
 ) {
     for (interaction, mut color, action) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => match action {
                 PauseButtonAction::Restart => {
+                    commands.spawn(AudioPlayer::new(assets.click.clone()));
                     load_timer.0.reset();
                     // Reset stats
                     stats.max_population = 100.0;
                     stats.start_time = time.elapsed_secs();
-
                     next_state.set(GameState::Loading);
                 }
                 _ => {}
@@ -349,6 +376,7 @@ pub fn handle_win_input(
 }
 
 pub fn handle_pause_buttons(
+    mut commands: Commands,
     mut interaction_query: Query<
         (&Interaction, &mut BackgroundColor, &PauseButtonAction),
         (Changed<Interaction>, With<Button>),
@@ -357,14 +385,17 @@ pub fn handle_pause_buttons(
     mut load_timer: ResMut<AssetLoadTimer>,
     mut stats: ResMut<GameStats>,
     time: Res<Time>,
+    assets: Res<GameAssets>,
 ) {
     for (interaction, mut color, action) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => match action {
                 PauseButtonAction::Continue => {
+                    commands.spawn(AudioPlayer::new(assets.click.clone()));
                     next_state.set(GameState::Playing);
                 }
                 PauseButtonAction::Restart => {
+                    commands.spawn(AudioPlayer::new(assets.click.clone()));
                     load_timer.0.reset();
                     // Reset stats
                     stats.max_population = 100.0;

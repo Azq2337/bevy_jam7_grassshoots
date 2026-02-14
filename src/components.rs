@@ -73,6 +73,9 @@ pub enum PauseButtonAction {
 }
 
 #[derive(Component)]
+pub struct FootstepTimer(pub Timer);
+
+#[derive(Component)]
 pub struct Magnetic {
     pub strength: f32,
 }

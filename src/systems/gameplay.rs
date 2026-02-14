@@ -5,7 +5,7 @@ use bevy::prelude::*;
 
 pub fn bullet_hit_target(
     mut commands: Commands,
-    mut collision_events: MessageReader<CollisionStart>,
+    mut collision_events: bevy::ecs::message::MessageReader<CollisionStart>,
     bullet_q: Query<Entity, With<Bullet>>,
     mut target_q: Query<(
         Entity,
@@ -34,6 +34,9 @@ pub fn bullet_hit_target(
         if let Ok((target_ent, _target_data, mut target_transform, mut mergeable, mut mat)) =
             target_q.get_mut(target)
         {
+            // Play hit sound (or just reuse shoot/merge for now if no specific hit sound, sticking to basic plan)
+            // commands.spawn(AudioPlayer::new(assets.hit.clone()));
+
             // Decrement Level (Health)
             if mergeable.level > 1 {
                 mergeable.level -= 1;
@@ -49,6 +52,15 @@ pub fn bullet_hit_target(
                 if let Ok(mut cmds) = commands.get_entity(target_ent) {
                     cmds.despawn();
                 }
+
+                // Play destroy sound (spatial)
+                // Use target transform for position
+                commands.spawn((
+                    AudioPlayer::new(assets.destroy.clone()),
+                    PlaybackSettings::DESPAWN.with_spatial(true),
+                    Transform::from_translation(target_transform.translation),
+                ));
+
                 commands.spawn(RespawnTimer {
                     timer: Timer::from_seconds(3.0, TimerMode::Once),
                 });
@@ -139,15 +151,25 @@ pub fn spawn_new_target(
         SweptCcd::default(),
         CollisionEventsEnabled,
         Restitution::new(0.5),
+        Magnetic { strength: 1.0 }, // Base strength, scaled by logic
+    ));
+
+    // Play spawn sound (spatial)
+    commands.spawn((
+        AudioPlayer::new(assets.spawn.clone()),
+        PlaybackSettings::DESPAWN
+            .with_spatial(true)
+            .with_volume(bevy::audio::Volume::Linear(0.8)),
+        Transform::from_translation(pos),
     ));
 }
 
 pub fn handle_merging(
     mut commands: Commands,
-    mut collision_events: MessageReader<CollisionStart>,
+    mut collision_events: bevy::ecs::message::MessageReader<CollisionStart>,
     target_q: Query<(&Transform, &Target, &Mergeable)>,
     assets: Res<GameAssets>,
-    game_mode: Res<GameMode>,
+    _game_mode: Res<GameMode>,
 ) {
     let mut processed = std::collections::HashSet::new();
 
@@ -162,10 +184,12 @@ pub fn handle_merging(
         if let (Ok((tr1, t1, m1)), Ok((tr2, t2, m2))) = (target_q.get(e1), target_q.get(e2)) {
             // Check if mergeable (same level, ignore shape)
             if m1.level == m2.level {
-                // Mode check: In Survival, limit max level to 7
-                if *game_mode == GameMode::Survival && m1.level >= 7 {
-                    continue;
-                }
+                // In Survival, if they merge to > target, it's game over, handled in check_game_over.
+                // We don't prevent merge here anymore as per new logic?
+                // Wait, for survival, "Bigness growth stops" was the old issue.
+                // Now we want them to lose if they hit the target. So let them merge.
+                // But wait, if they reach max level, do we merge?
+                // If Mode=Survival, Target=8. If they have two 7s, they merge to 8. That triggers game over.
 
                 let new_level = m1.level + 1;
                 // Merge health? Or reset? Let's sum for now or max.
@@ -189,6 +213,9 @@ pub fn handle_merging(
                     &assets,
                     Some((new_pos, new_shape, new_level, new_health)),
                 );
+
+                // Play merge sound
+                commands.spawn(AudioPlayer::new(assets.merge.clone()));
             }
         }
     }
@@ -355,11 +382,24 @@ pub fn check_game_over(
     target_q: Query<&Mergeable>,
     game_mode: Res<GameMode>,
 ) {
-    // Level 8 is Win in MergeToWin mode
-    if *game_mode == GameMode::MergeToWin {
-        for mergeable in target_q.iter() {
-            if mergeable.level >= 8 {
-                next_state.set(GameState::Win);
+    match *game_mode {
+        GameMode::MergeToWin { target_level } => {
+            // Reaching Target Level is a WIN
+            for mergeable in target_q.iter() {
+                if mergeable.level >= target_level {
+                    next_state.set(GameState::Win);
+                    return;
+                }
+            }
+        }
+        GameMode::Survival { target_level } => {
+            // Reaching Target Level is a LOSE (Game Over)
+            // Goal is to prevent merging to target
+            for mergeable in target_q.iter() {
+                if mergeable.level >= target_level {
+                    next_state.set(GameState::GameOver);
+                    return;
+                }
             }
         }
     }
@@ -371,39 +411,38 @@ pub fn update_game_stats(mut stats: ResMut<GameStats>, time: Res<Time>) {
 
 pub fn magnetic_pull(
     _commands: Commands,
-    target_q: Query<(Entity, &Transform, &Mergeable, &RigidBody)>,
+    target_q: Query<(Entity, &Transform, &Mergeable, &RigidBody, &Magnetic)>,
     game_mode: Res<GameMode>,
     time: Res<Time>,
     mut velocities: Query<&mut LinearVelocity>,
 ) {
-    if *game_mode != GameMode::Survival {
-        return;
-    }
+    if let GameMode::Survival { .. } = *game_mode {
+        // N^2 but fine for now
+        let targets: Vec<_> = target_q.iter().collect();
 
-    // N^2 but fine for now
-    let targets: Vec<_> = target_q.iter().collect();
-
-    for i in 0..targets.len() {
-        let (_e1, t1, m1, _rb1) = targets[i];
-        if m1.level < 4 {
-            continue;
-        }
-
-        for j in 0..targets.len() {
-            if i == j {
+        for i in 0..targets.len() {
+            let (_e1, t1, m1, _rb1, mag1) = targets[i];
+            if m1.level < 4 {
                 continue;
             }
-            let (e2, t2, m2, _rb2) = targets[j];
 
-            // Bigger pulls smaller or equal
-            if m1.level > m2.level {
+            for j in 0..targets.len() {
+                if i == j {
+                    continue;
+                }
+                let (e2, t2, _m2, _rb2, _mag2) = targets[j];
+
+                // Bigger pulls smaller or equal (based on level logic)
+                // Actually, let's just use magnetic strength directly?
+                // Logic: "Each object pulls others".
+                // We use m1.level to gate if it pulls?
+
                 let dir = t1.translation - t2.translation;
                 let dist_sq = dir.length_squared();
 
-                if dist_sq < 100.0 && dist_sq > 1.0 {
-                    // Radius 10
-                    let force_mag = (m1.level as f32) * 5.0 / dist_sq;
-                    let force = dir.normalize() * force_mag * time.delta_secs() * 100.0;
+                if dist_sq < 64.0 && dist_sq > 1.0 {
+                    let force_mag = (m1.level as f32) * mag1.strength / dist_sq;
+                    let force = dir.normalize() * force_mag * time.delta_secs() * 20.0;
 
                     if let Ok(mut vel) = velocities.get_mut(e2) {
                         vel.0 += force;

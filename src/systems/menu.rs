@@ -8,9 +8,13 @@ pub struct MenuScreen;
 pub enum MenuButtonAction {
     PlayMergeToWin,
     PlaySurvival,
+    ToggleDifficulty,
 }
 
-pub fn spawn_menu_screen(mut commands: Commands) {
+#[derive(Resource)]
+pub struct SelectedDifficulty(pub u32); // Stores 8 to 16
+
+pub fn spawn_menu_screen(mut commands: Commands, selected_difficulty: Res<SelectedDifficulty>) {
     commands
         .spawn((
             MenuScreen,
@@ -45,7 +49,38 @@ pub fn spawn_menu_screen(mut commands: Commands) {
                 TextColor(Color::WHITE),
             ));
 
+            // Difficulty Toggle
             let button_node = Node {
+                width: Val::Px(300.0),
+                height: Val::Px(50.0),
+                border: UiRect::all(Val::Px(2.0)),
+                margin: UiRect::all(Val::Px(5.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            };
+            let button_bg = BackgroundColor(Color::linear_rgb(0.2, 0.2, 0.2));
+            let text_font = TextFont {
+                font_size: 25.0,
+                ..default()
+            };
+
+            parent
+                .spawn((
+                    Button,
+                    button_node.clone(),
+                    button_bg,
+                    MenuButtonAction::ToggleDifficulty,
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Text::new(format!("Target Level: {}", selected_difficulty.0)),
+                        text_font.clone(),
+                        TextColor(Color::srgb(1.0, 0.8, 0.2)),
+                    ));
+                });
+
+            let play_button_node = Node {
                 width: Val::Px(300.0),
                 height: Val::Px(65.0),
                 border: UiRect::all(Val::Px(2.0)),
@@ -54,26 +89,26 @@ pub fn spawn_menu_screen(mut commands: Commands) {
                 align_items: AlignItems::Center,
                 ..default()
             };
-            let button_bg = BackgroundColor(Color::linear_rgb(0.15, 0.15, 0.15));
-            let text_font = TextFont {
+            let play_button_bg = BackgroundColor(Color::linear_rgb(0.15, 0.15, 0.15));
+            let play_text_font = TextFont {
                 font_size: 30.0,
                 ..default()
             };
-            let text_color = TextColor(Color::srgb(0.9, 0.9, 0.9));
+            let play_text_color = TextColor(Color::srgb(0.9, 0.9, 0.9));
 
             // Merge to Win Button
             parent
                 .spawn((
                     Button,
-                    button_node.clone(),
-                    button_bg,
+                    play_button_node.clone(),
+                    play_button_bg,
                     MenuButtonAction::PlayMergeToWin,
                 ))
                 .with_children(|parent| {
                     parent.spawn((
                         Text::new("Mode 1: Merge to Win"),
-                        text_font.clone(),
-                        text_color,
+                        play_text_font.clone(),
+                        play_text_color,
                     ));
                 });
 
@@ -81,12 +116,16 @@ pub fn spawn_menu_screen(mut commands: Commands) {
             parent
                 .spawn((
                     Button,
-                    button_node,
-                    button_bg,
+                    play_button_node,
+                    play_button_bg,
                     MenuButtonAction::PlaySurvival,
                 ))
                 .with_children(|parent| {
-                    parent.spawn((Text::new("Mode 2: Survival"), text_font, text_color));
+                    parent.spawn((
+                        Text::new("Mode 2: Survival"),
+                        play_text_font,
+                        play_text_color,
+                    ));
                 });
 
             // Controls Info
@@ -110,26 +149,54 @@ pub fn despawn_menu_screen(mut commands: Commands, query: Query<Entity, With<Men
 }
 
 pub fn handle_menu_interaction(
-    mut commands: Commands, // Not used but good practice
+    mut commands: Commands,
     mut interaction_query: Query<
-        (&Interaction, &mut BackgroundColor, &MenuButtonAction),
+        (
+            Entity,
+            &Interaction,
+            &mut BackgroundColor,
+            &MenuButtonAction,
+            &Children,
+        ),
         (Changed<Interaction>, With<Button>),
     >,
+    mut text_query: Query<&mut Text>,
     mut next_state: ResMut<NextState<GameState>>,
     mut game_mode: ResMut<GameMode>,
+    mut selected_difficulty: ResMut<SelectedDifficulty>,
+    assets: Res<GameAssets>,
 ) {
-    for (interaction, mut color, action) in &mut interaction_query {
+    for (_entity, interaction, mut color, action, children) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => {
+                commands.spawn(AudioPlayer::new(assets.click.clone()));
+
                 match action {
                     MenuButtonAction::PlayMergeToWin => {
-                        *game_mode = GameMode::MergeToWin;
+                        *game_mode = GameMode::MergeToWin {
+                            target_level: selected_difficulty.0,
+                        };
+                        next_state.set(GameState::Playing);
                     }
                     MenuButtonAction::PlaySurvival => {
-                        *game_mode = GameMode::Survival;
+                        *game_mode = GameMode::Survival {
+                            target_level: selected_difficulty.0,
+                        };
+                        next_state.set(GameState::Playing);
+                    }
+                    MenuButtonAction::ToggleDifficulty => {
+                        selected_difficulty.0 += 1;
+                        if selected_difficulty.0 > 16 {
+                            selected_difficulty.0 = 8;
+                        }
+                        // Update text
+                        for child in children {
+                            if let Ok(mut text) = text_query.get_mut(*child) {
+                                text.0 = format!("Target Level: {}", selected_difficulty.0);
+                            }
+                        }
                     }
                 }
-                next_state.set(GameState::Playing);
             }
             Interaction::Hovered => {
                 *color = BackgroundColor(Color::linear_rgb(0.25, 0.25, 0.25));

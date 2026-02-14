@@ -5,7 +5,6 @@ mod systems;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::components::*;
 use crate::resources::*;
 use crate::systems::{gameplay, menu, player, setup, ui};
 
@@ -20,8 +19,9 @@ fn main() {
             start_time: 0.0,
             max_population: 100.0,
         })
-        .insert_resource(HighScore::default())
+        .insert_resource(HighScores::default())
         .insert_resource(GameMode::default())
+        .insert_resource(menu::SelectedDifficulty(8))
         .init_state::<GameState>()
         .add_systems(Startup, setup::setup)
         // Loading State
@@ -56,6 +56,8 @@ fn main() {
                 setup::despawn_menu_camera,
             ),
         )
+        // Audio
+        .add_systems(Update, systems::audio::manage_bgm)
         // Playing State
         .add_systems(
             Update,
@@ -97,7 +99,7 @@ fn main() {
             OnExit(GameState::Paused),
             (ui::capture_cursor, ui::unpause_time, ui::despawn_pause_menu),
         )
-        // Win State
+        // Win State (Mode 1 Win)
         .add_systems(
             OnEnter(GameState::Win),
             (ui::release_cursor, ui::spawn_win_screen),
@@ -108,6 +110,19 @@ fn main() {
         )
         .add_systems(
             OnExit(GameState::Win),
+            (ui::despawn_win_screen, ui::capture_cursor),
+        )
+        // GameOver State (Mode 2 Loss)
+        .add_systems(
+            OnEnter(GameState::GameOver),
+            (ui::release_cursor, ui::spawn_win_screen),
+        ) // Re-using win screen spawner which handles both
+        .add_systems(
+            Update,
+            ui::handle_win_input.run_if(in_state(GameState::GameOver)),
+        )
+        .add_systems(
+            OnExit(GameState::GameOver),
             (ui::despawn_win_screen, ui::capture_cursor),
         )
         .run();

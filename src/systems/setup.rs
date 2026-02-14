@@ -9,36 +9,58 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     let mut shape_meshes = HashMap::new();
     shape_meshes.insert(ShapeType::Cube, meshes.add(Cuboid::new(1.0, 1.0, 1.0)));
     shape_meshes.insert(ShapeType::Sphere, meshes.add(Sphere::new(0.5)));
     shape_meshes.insert(ShapeType::Cylinder, meshes.add(Cylinder::new(0.5, 1.0)));
     shape_meshes.insert(ShapeType::Capsule, meshes.add(Capsule3d::new(0.5, 1.0)));
-    shape_meshes.insert(ShapeType::Capsule, meshes.add(Capsule3d::new(0.5, 1.0)));
     shape_meshes.insert(ShapeType::Cone, meshes.add(Cone::new(0.5, 1.0)));
     shape_meshes.insert(ShapeType::Torus, meshes.add(Torus::new(0.3, 0.7)));
     shape_meshes.insert(ShapeType::Tetrahedron, meshes.add(Tetrahedron::default()));
 
     let mut level_materials = Vec::new();
-    // Colors for levels 1-8 (Rainbow: Red -> Purple)
-    let colors = [
-        Color::srgb(1.0, 0.0, 0.0),   // 1 Red
-        Color::srgb(1.0, 0.5, 0.0),   // 2 Orange
-        Color::srgb(1.0, 1.0, 0.0),   // 3 Yellow
-        Color::srgb(0.0, 1.0, 0.0),   // 4 Green (Spawn)
-        Color::srgb(0.0, 0.0, 1.0),   // 5 Blue
-        Color::srgb(0.29, 0.0, 0.51), // 6 Indigo
-        Color::srgb(0.5, 0.0, 0.5),   // 7 Violet
-        Color::srgb(0.0, 0.0, 0.0),   // 8 Black/Purple (Win)
-    ];
+    // Colors for levels 1-16
+    // 1-8: Rainbow + Black
+    // 9-16: Metallic/Emissive variants or shifting hue
+    for i in 0..16 {
+        let color = if i < 8 {
+            match i {
+                0 => Color::srgb(1.0, 0.0, 0.0),   // 1 Red
+                1 => Color::srgb(1.0, 0.5, 0.0),   // 2 Orange
+                2 => Color::srgb(1.0, 1.0, 0.0),   // 3 Yellow
+                3 => Color::srgb(0.0, 1.0, 0.0),   // 4 Green
+                4 => Color::srgb(0.0, 0.0, 1.0),   // 5 Blue
+                5 => Color::srgb(0.29, 0.0, 0.51), // 6 Indigo
+                6 => Color::srgb(0.5, 0.0, 0.5),   // 7 Violet
+                _ => Color::srgb(0.1, 0.1, 0.1),   // 8 Black
+            }
+        } else {
+            // Levels 9-16: Brighter, maybe emissive or distinct
+            // HSL rotation?
+            let hue = ((i as f32 - 8.0) / 8.0) * 360.0;
+            Color::hsl(hue, 1.0, 0.7)
+        };
 
-    for color in colors {
-        level_materials.push(materials.add(StandardMaterial {
-            base_color: color,
-            perceptual_roughness: 0.5,
-            ..default()
-        }));
+        let material = if i < 8 {
+            StandardMaterial {
+                base_color: color,
+                perceptual_roughness: 0.5,
+                ..default()
+            }
+        } else {
+            // Shiny metallic for high levels
+            StandardMaterial {
+                base_color: color,
+                perceptual_roughness: 0.2,
+                metallic: 0.8,
+                emissive: LinearRgba::from(color).into(),
+                ..default()
+            }
+        };
+
+        level_materials.push(materials.add(material));
     }
 
     let game_assets = GameAssets {
@@ -55,6 +77,18 @@ pub fn setup(
         }),
         shape_meshes,
         level_materials,
+        // Audio
+        bgm_menu: asset_server.load("sounds/bgm_menu.ogg"),
+        bgm_mode1: asset_server.load("sounds/bgm_mode1.ogg"),
+        bgm_mode2: asset_server.load("sounds/bgm_mode2.ogg"),
+        shoot: asset_server.load("sounds/shoot.ogg"),
+        merge: asset_server.load("sounds/merge.ogg"),
+        win: asset_server.load("sounds/win.ogg"),
+        game_over: asset_server.load("sounds/game_over.ogg"),
+        click: asset_server.load("sounds/click.ogg"),
+        footstep: asset_server.load("sounds/footstep.ogg"),
+        spawn: asset_server.load("sounds/spawn.ogg"),
+        destroy: asset_server.load("sounds/destory.ogg"), // Typo in filename
     };
 
     commands.insert_resource(game_assets);
@@ -193,7 +227,7 @@ pub fn setup(
 
     // Control Guide (Top Right)
     commands.spawn((
-        Text::new("Controls:\nWASD: Move\nSpace: Jump\nShift: Dash\nLMB: Shoot\nRMB: Aim / Grab Info\nRMB + Click: Grab\nLMB (Holding): Throw"),
+        Text::new("Controls:\nWASD: Move\nSpace: Jump\nShift: Dash\nLMB: Shoot / Throw\nRMB: Aim / Grab\n"),
         TextFont {
             font_size: 18.0,
             ..default()
@@ -292,11 +326,13 @@ pub fn spawn_level(
             Collider::capsule(0.4, 1.0),
             LockedAxes::ROTATION_LOCKED,
             Friction::new(0.0),
+            FootstepTimer(Timer::from_seconds(0.5, TimerMode::Repeating)),
         ))
         .with_children(|parent| {
             parent
                 .spawn((
                     Camera3d::default(),
+                    SpatialListener::new(2.0), // Add SpatialListener for 3D audio
                     Projection::Perspective(PerspectiveProjection {
                         fov: 100.0_f32.to_radians(),
                         ..default()
@@ -318,4 +354,6 @@ pub fn spawn_level(
                     ));
                 });
         });
+
+    // BGM handled by audio system
 }
