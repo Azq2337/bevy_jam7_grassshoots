@@ -310,7 +310,7 @@ pub fn spawn_level(
             3 => ShapeType::Capsule,
             _ => ShapeType::Cone,
         };
-        spawn_new_target(&mut commands, &assets, Some((pos, shape, 4, 4)));
+        spawn_new_target(&mut commands, &assets, Some((pos, shape, 4, 4)), None);
     }
 
     let initial_pitch = -0.22;

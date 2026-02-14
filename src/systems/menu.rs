@@ -8,11 +8,15 @@ pub struct MenuScreen;
 pub enum MenuButtonAction {
     PlayMergeToWin,
     PlaySurvival,
-    ToggleDifficulty,
+    DecreaseDifficulty,
+    IncreaseDifficulty,
 }
 
 #[derive(Resource)]
 pub struct SelectedDifficulty(pub u32); // Stores 8 to 16
+
+#[derive(Component)]
+pub struct SelectedDifficultyText;
 
 pub fn spawn_menu_screen(mut commands: Commands, selected_difficulty: Res<SelectedDifficulty>) {
     commands
@@ -49,39 +53,65 @@ pub fn spawn_menu_screen(mut commands: Commands, selected_difficulty: Res<Select
                 TextColor(Color::WHITE),
             ));
 
-            // Difficulty Toggle
-            let button_node = Node {
-                width: Val::Px(300.0),
+            // Difficulty Stepper
+            let stepper_node = Node {
+                width: Val::Px(500.0),
+                height: Val::Px(50.0),
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                ..default()
+            };
+
+            let arrow_button_node = Node {
+                width: Val::Px(50.0),
                 height: Val::Px(50.0),
                 border: UiRect::all(Val::Px(2.0)),
-                margin: UiRect::all(Val::Px(5.0)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
             };
-            let button_bg = BackgroundColor(Color::linear_rgb(0.2, 0.2, 0.2));
+
             let text_font = TextFont {
                 font_size: 25.0,
                 ..default()
             };
 
-            parent
-                .spawn((
-                    Button,
-                    button_node.clone(),
-                    button_bg,
-                    MenuButtonAction::ToggleDifficulty,
-                ))
-                .with_children(|parent| {
-                    parent.spawn((
-                        Text::new(format!("Target Level: {}", selected_difficulty.0)),
-                        text_font.clone(),
-                        TextColor(Color::srgb(1.0, 0.8, 0.2)),
-                    ));
-                });
+            parent.spawn(stepper_node).with_children(|parent| {
+                // Decrease Button
+                parent
+                    .spawn((
+                        Button,
+                        arrow_button_node.clone(),
+                        BackgroundColor(Color::linear_rgb(0.2, 0.2, 0.2)),
+                        MenuButtonAction::DecreaseDifficulty,
+                    ))
+                    .with_children(|parent| {
+                        parent.spawn((Text::new("<"), text_font.clone(), TextColor(Color::WHITE)));
+                    });
+
+                // Value Text
+                parent.spawn((
+                    Text::new(format!("Target Level: {}", selected_difficulty.0)),
+                    text_font.clone(),
+                    TextColor(Color::srgb(1.0, 0.8, 0.2)),
+                    SelectedDifficultyText, // Tag component might be needed? Or assume structure
+                ));
+
+                // Increase Button
+                parent
+                    .spawn((
+                        Button,
+                        arrow_button_node.clone(),
+                        BackgroundColor(Color::linear_rgb(0.2, 0.2, 0.2)),
+                        MenuButtonAction::IncreaseDifficulty,
+                    ))
+                    .with_children(|parent| {
+                        parent.spawn((Text::new(">"), text_font.clone(), TextColor(Color::WHITE)));
+                    });
+            });
 
             let play_button_node = Node {
-                width: Val::Px(300.0),
+                width: Val::Px(500.0),
                 height: Val::Px(65.0),
                 border: UiRect::all(Val::Px(2.0)),
                 margin: UiRect::all(Val::Px(10.0)),
@@ -160,16 +190,22 @@ pub fn handle_menu_interaction(
         ),
         (Changed<Interaction>, With<Button>),
     >,
-    mut text_query: Query<&mut Text>,
+    mut difficulty_text_query: Query<
+        &mut Text,
+        (With<SelectedDifficultyText>, Without<MenuButtonAction>),
+    >,
     mut next_state: ResMut<NextState<GameState>>,
     mut game_mode: ResMut<GameMode>,
     mut selected_difficulty: ResMut<SelectedDifficulty>,
     assets: Res<GameAssets>,
 ) {
-    for (_entity, interaction, mut color, action, children) in &mut interaction_query {
+    for (_entity, interaction, mut color, action, _children) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => {
-                commands.spawn(AudioPlayer::new(assets.click.clone()));
+                commands.spawn((
+                    AudioPlayer::new(assets.click.clone()),
+                    PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(0.3)),
+                ));
 
                 match action {
                     MenuButtonAction::PlayMergeToWin => {
@@ -184,16 +220,20 @@ pub fn handle_menu_interaction(
                         };
                         next_state.set(GameState::Playing);
                     }
-                    MenuButtonAction::ToggleDifficulty => {
-                        selected_difficulty.0 += 1;
-                        if selected_difficulty.0 > 16 {
-                            selected_difficulty.0 = 8;
+                    MenuButtonAction::DecreaseDifficulty => {
+                        if selected_difficulty.0 > 8 {
+                            selected_difficulty.0 -= 1;
                         }
-                        // Update text
-                        for child in children {
-                            if let Ok(mut text) = text_query.get_mut(*child) {
-                                text.0 = format!("Target Level: {}", selected_difficulty.0);
-                            }
+                        if let Some(mut text) = difficulty_text_query.iter_mut().next() {
+                            text.0 = format!("Target Level: {}", selected_difficulty.0);
+                        }
+                    }
+                    MenuButtonAction::IncreaseDifficulty => {
+                        if selected_difficulty.0 < 16 {
+                            selected_difficulty.0 += 1;
+                        }
+                        if let Some(mut text) = difficulty_text_query.iter_mut().next() {
+                            text.0 = format!("Target Level: {}", selected_difficulty.0);
                         }
                     }
                 }

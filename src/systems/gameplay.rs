@@ -76,14 +76,17 @@ pub fn handle_respawns(
     assets: Res<GameAssets>,
     targets: Query<Entity, With<Target>>,
     stats: Res<GameStats>,
+    listener_q: Query<&GlobalTransform, With<SpatialListener>>,
 ) {
+    let listener_pos = listener_q.iter().next().map(|tr| tr.translation());
+
     // 1. Process timers
     for (ent, mut respawn) in timers.iter_mut() {
         if respawn.timer.tick(time.delta()).just_finished() {
             if let Ok(mut c) = commands.get_entity(ent) {
                 c.despawn();
             }
-            spawn_new_target(&mut commands, &assets, None);
+            spawn_new_target(&mut commands, &assets, None, listener_pos);
         }
     }
 
@@ -96,17 +99,18 @@ pub fn handle_respawns(
         let needed = max_pop - current_count;
         let to_spawn = needed.min(5);
         for _ in 0..to_spawn {
-            spawn_new_target(&mut commands, &assets, None);
+            spawn_new_target(&mut commands, &assets, None, listener_pos);
         }
     }
 }
 
 pub fn spawn_new_target(
     commands: &mut Commands,
-    assets: &Res<GameAssets>,
-    override_data: Option<(Vec3, ShapeType, u32, i32)>, // pos, shape, level, health
+    assets: &GameAssets,
+    data: Option<(Vec3, ShapeType, u32, i32)>, // pos, shape, level, health (u32, i32 matches struct)
+    listener_pos: Option<Vec3>,
 ) {
-    let (pos, shape, level, health) = if let Some((p, s, l, h)) = override_data {
+    let (pos, shape, level, health) = if let Some((p, s, l, h)) = data {
         (p, s, l, h)
     } else {
         let x = rand::random::<f32>() * 40.0 - 20.0;
@@ -154,14 +158,28 @@ pub fn spawn_new_target(
         Magnetic { strength: 1.0 }, // Base strength, scaled by logic
     ));
 
-    // Play spawn sound (spatial)
-    commands.spawn((
-        AudioPlayer::new(assets.spawn.clone()),
-        PlaybackSettings::DESPAWN
-            .with_spatial(true)
-            .with_volume(bevy::audio::Volume::Linear(0.8)),
-        Transform::from_translation(pos),
-    ));
+    // Play spawn sound (spatial with cutoff)
+    let volume = if let Some(l_pos) = listener_pos {
+        let dist = pos.distance(l_pos);
+        if dist > 3.0 {
+            0.0
+        } else {
+            // Linear dropoff from 0 to 3m
+            0.8 * (1.0 - (dist / 3.0)).clamp(0.0, 1.0)
+        }
+    } else {
+        0.0 // Silent on startup
+    };
+
+    if volume > 0.0 {
+        commands.spawn((
+            AudioPlayer::new(assets.spawn.clone()),
+            PlaybackSettings::DESPAWN
+                .with_spatial(true)
+                .with_volume(bevy::audio::Volume::Linear(volume)),
+            Transform::from_translation(pos),
+        ));
+    }
 }
 
 pub fn handle_merging(
@@ -170,8 +188,12 @@ pub fn handle_merging(
     target_q: Query<(&Transform, &Target, &Mergeable)>,
     assets: Res<GameAssets>,
     _game_mode: Res<GameMode>,
+    listener_q: Query<&GlobalTransform, With<SpatialListener>>,
+    grabbed_q: Query<Entity, With<Grabbed>>,
 ) {
     let mut processed = std::collections::HashSet::new();
+    let listener_pos = listener_q.iter().next().map(|tr| tr.translation());
+    let held_entity = grabbed_q.iter().next();
 
     for collision in collision_events.read() {
         let e1 = collision.collider1;
@@ -184,13 +206,6 @@ pub fn handle_merging(
         if let (Ok((tr1, t1, m1)), Ok((tr2, t2, m2))) = (target_q.get(e1), target_q.get(e2)) {
             // Check if mergeable (same level, ignore shape)
             if m1.level == m2.level {
-                // In Survival, if they merge to > target, it's game over, handled in check_game_over.
-                // We don't prevent merge here anymore as per new logic?
-                // Wait, for survival, "Bigness growth stops" was the old issue.
-                // Now we want them to lose if they hit the target. So let them merge.
-                // But wait, if they reach max level, do we merge?
-                // If Mode=Survival, Target=8. If they have two 7s, they merge to 8. That triggers game over.
-
                 let new_level = m1.level + 1;
                 // Merge health? Or reset? Let's sum for now or max.
                 let new_health = (t1.health + t2.health).min(10);
@@ -212,10 +227,40 @@ pub fn handle_merging(
                     &mut commands,
                     &assets,
                     Some((new_pos, new_shape, new_level, new_health)),
+                    listener_pos,
                 );
 
-                // Play merge sound
-                commands.spawn(AudioPlayer::new(assets.merge.clone()));
+                // Check for held object priority
+                let mut is_held_merge = false;
+                if let Some(held) = held_entity {
+                    if e1 == held || e2 == held {
+                        is_held_merge = true;
+                    }
+                }
+
+                // Play merge sound (spatial with cutoff)
+                let volume = if is_held_merge {
+                    1.0
+                } else if let Some(l_pos) = listener_pos {
+                    let dist = new_pos.distance(l_pos);
+                    if dist > 3.0 {
+                        0.0
+                    } else {
+                        1.0 * (1.0 - (dist / 3.0)).clamp(0.0, 1.0)
+                    }
+                } else {
+                    0.0
+                };
+
+                if volume > 0.0 {
+                    commands.spawn((
+                        AudioPlayer::new(assets.merge.clone()),
+                        PlaybackSettings::DESPAWN
+                            .with_spatial(true)
+                            .with_volume(bevy::audio::Volume::Linear(volume)),
+                        Transform::from_translation(new_pos),
+                    ));
+                }
             }
         }
     }
@@ -233,7 +278,7 @@ pub fn update_gun(
 
     // Base positions (relative to camera)
     let default_pos = Vec3::new(0.35, -0.25, -0.45);
-    let ads_pos = Vec3::new(0.0, -0.15, -0.3); // Centered
+    let ads_pos = Vec3::new(0.0, -0.20, -0.25); // Moved closer and slightly lower
     let lowered_pos = Vec3::new(0.35, -0.5, -0.2); // Lowered
 
     // Rotation

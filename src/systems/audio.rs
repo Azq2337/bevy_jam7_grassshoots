@@ -32,7 +32,11 @@ pub fn manage_bgm(
         };
 
         if let Some(bgm) = bgm_handle {
-            commands.spawn((AudioPlayer::new(bgm), PlaybackSettings::LOOP, Bgm));
+            commands.spawn((
+                AudioPlayer::new(bgm),
+                PlaybackSettings::LOOP.with_volume(bevy::audio::Volume::Linear(0.4)),
+                Bgm,
+            ));
         }
     }
 }

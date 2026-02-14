@@ -57,7 +57,7 @@ pub fn player_move(
         mut velocity,
         mut jump_count,
         mut dash_cd,
-        dash_active,
+        _dash_active,
         mut footstep_timer,
     )) = player_q.iter_mut().next()
     else {
@@ -134,6 +134,11 @@ pub fn player_move(
     if keys.just_pressed(KeyCode::ShiftLeft) && dash_cd.0.elapsed() >= dash_cd.0.duration() {
         dash_cd.0.reset();
         velocity.0 = move_dir * 50.0;
+        // Play dash sound (footstep)
+        commands.spawn((
+            AudioPlayer::new(assets.footstep.clone()),
+            PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(1.0)),
+        ));
     } else {
         let target_vel = move_dir * speed;
         velocity.0.x = velocity.0.x.lerp(target_vel.x, 10.0 * time.delta_secs());
@@ -144,6 +149,11 @@ pub fn player_move(
         if is_grounded || jump_count.0 < 1 {
             velocity.0.y = 7.0;
             jump_count.0 += 1;
+            // Play jump sound (footstep)
+            commands.spawn((
+                AudioPlayer::new(assets.footstep.clone()),
+                PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(0.8)),
+            ));
         }
     }
 }
